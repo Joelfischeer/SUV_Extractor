@@ -53,29 +53,40 @@ if __name__ == "__main__":
     )
 
     from Image_loading.Image_Loader import PET_Organ_Cropper
-    from Analysis.SUV_calculation import compute_suv
+    from Analysis.SUV_calculation import compute_suv, convert_pet_to_suv
     from Results_saving.results_saver import results_saver
 
     all_results = []
+
     for patient in patients:
-        PET_organs = PET_Organ_Cropper(
-                        data_dir=imgdir,
-                        patient=patient,
-                        organs_of_interest=organs_of_interest,
-                        combination_logic=combination_logic,
-                    )
+        pet_folder = imgdir / patient / "STATIC-AC-RECON-LAST-5-MIN"
+        try:
+            pet_suv = convert_pet_to_suv(pet_folder)
+        except Exception as e:
+            print(f"⚠️ Could not load PET for {patient}: {e}")
+            continue
         
+        # Crop organs (returns dict of organ_name -> np.array of SUV values)
+        PET_organs = PET_Organ_Cropper(
+            data_dir=imgdir,
+            patient=patient,
+            organs_of_interest=organs_of_interest,
+            combination_logic=combination_logic,
+            custom_pet_array=pet_suv  # pass SUV array directly if supported
+        )
+
+        # Compute normalized SUV
         patient_result = compute_suv(
             PET_organs,
             organs_of_interest,
             patient_id=patient
         )
-
         if patient_result is not None:
             all_results.append(patient_result)
 
-    results_saver(all_results,
-                    output_path)
+    # Save CSV
+    results_saver(all_results, output_path)
+    print(f"✅ SUV results saved to {output_path}")
         
 
 

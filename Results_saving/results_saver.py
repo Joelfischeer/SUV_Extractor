@@ -27,6 +27,6 @@ def results_saver(results, output_path):
     # --------------------------------------------------
     # Save CSV
     # --------------------------------------------------
-    df.to_csv(f'{output_path}_SUVs.csv', index=False)
+    df.to_csv(f'{output_path}_SUVs.csv', index=False, sep=';')
 
     print(f"\n✅ SUV results saved to: {output_path}")
