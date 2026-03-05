@@ -6,7 +6,7 @@ import gc
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../data/Images/Healthy_Test_Retest_First_Scan")
+    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
 
     output_path = Path("../Results/Healthy_Test_Retest_First_Scan")
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
             patient=patient,
             organs_of_interest=organs_of_interest,
             combination_logic=combination_logic,
-            custom_pet_array=pet_suv  # pass SUV array directly if supported
+            custom_pet_array=pet_suv  
         )
 
         # Compute normalized SUV
@@ -86,7 +86,6 @@ if __name__ == "__main__":
 
     # Save CSV
     results_saver(all_results, output_path)
-    print(f"✅ SUV results saved to {output_path}")
         
 
 
