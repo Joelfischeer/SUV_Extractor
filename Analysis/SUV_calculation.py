@@ -56,6 +56,7 @@ def compute_suv(
         print(f"⚠️ No aorta for {patient_id}, skipping.")
         return None
 
+    #Get the aorta mean SUV:
     aorta_non_zero = organ_dict["aorta"][organ_dict["aorta"] > 0]
     if len(aorta_non_zero) == 0:
         print(f"⚠️ Aorta empty for {patient_id}, skipping.")
@@ -64,6 +65,7 @@ def compute_suv(
 
     result = {"Patient": patient_id}
     
+    #Loop through organs to normalize by aorta:
     for organ in organs_of_interest:
         if organ not in organ_dict:
             result[organ] = np.nan
