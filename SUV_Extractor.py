@@ -27,6 +27,8 @@ if __name__ == "__main__":
         'thyroid_gland'
     ]
 
+    rename = {'small_bowel': 'small_intestine'}
+
     combination_logic = {
     'lungs': ['lung_lower_lobe_left', 'lung_middle_lobe_left', 'lung_upper_lobe_left','lung_lower_lobe_right', 'lung_middle_lobe_right', 'lung_upper_lobe_right'],
     'adrenal_glands': ['adrenal_gland_left', 'adrenal_gland_right'],
@@ -87,6 +89,11 @@ if __name__ == "__main__":
             organs_of_interest,
             patient_id=patient
         )
+
+        #Rename the columns which the TotalSegmentator names differently:
+        patient_result = {rename.get(k, k): v for k, v in patient_result.items()}
+
+        #Store the results:
         if patient_result is not None:
             all_results.append(patient_result)
 
