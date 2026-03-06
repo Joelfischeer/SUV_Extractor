@@ -14,16 +14,23 @@ def convert_pet_to_suv(pet_folder: Path):
     dicom_file = list(pet_folder.glob("*.dcm"))[0]
     ds = pydicom.dcmread(dicom_file)
     
-    weight_g = ds.PatientWeight * 1000  # grams
-    rad_info = ds.RadiopharmaceuticalInformationSequence[0]
+    #Read metadata from file:
+    weight_g = ds.PatientWeight * 1000  # we need grams
+    rad_info = ds.RadiopharmaceuticalInformationSequence[0] # Tracer info
     injected_dose = rad_info.RadionuclideTotalDose  # Bq
     half_life = rad_info.RadionuclideHalfLife       # s
 
+    #Convert the DICOM timeformat into seconds:
     def dicom_time_to_seconds(t):
         return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
-
+    
+    #Calculate time difference between injection and scan aquisition:
     delta_t = dicom_time_to_seconds(ds.AcquisitionTime) - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
+
+    #Calculate decay constant:
     lambda_decay = math.log(2) / half_life
+
+    #Correct injected dose for decay: (Get remaining activity at scan time)
     decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
     
     # Load full PET series

@@ -59,7 +59,13 @@ if __name__ == "__main__":
     all_results = []
 
     for patient in patients:
-        pet_folder = imgdir / patient / "STATIC-AC-RECON-LAST-5-MIN"
+        #Get the folder with the PET DISOMs inside
+        patient_dir = imgdir / patient
+        pet_folder = next(
+            p for p in patient_dir.iterdir()
+            if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
+        )
+        #Convert to SUV image
         try:
             pet_suv = convert_pet_to_suv(pet_folder)
         except Exception as e:
