@@ -142,16 +142,54 @@ def PET_Organ_Cropper(
     organs_to_process = list(organs_of_interest) + ['aorta']
     cropped_organs = {}
 
+    # --------------------------------------------------
+    # Get vertebrae_L2 segmentation
+    # --------------------------------------------------
+    l2_key = next(
+        (k for k in available_segs.keys() if "vertebrae_l2" in k.lower()),
+        None
+    )
+
+    l2_z_range = None
+
+    if l2_key is not None and pet_sitk is not None:
+        l2_img = available_segs[l2_key]
+
+        aligned_l2 = sitk.Resample(
+            l2_img,
+            pet_sitk,
+            sitk.Transform(),
+            sitk.sitkNearestNeighbor,
+            0,
+            l2_img.GetPixelID()
+        )
+
+        l2_np = sitk.GetArrayFromImage(aligned_l2)
+
+        non_zero = np.argwhere(l2_np > 0)
+        if non_zero.size > 0:
+            # keep the exact z range of L2
+            min_z_l2, _, _ = non_zero.min(axis=0)
+            max_z_l2, _, _ = non_zero.max(axis=0)
+
+            l2_z_range = (min_z_l2, max_z_l2)
+
+        del aligned_l2, l2_np
+        gc.collect()
+
     for organ in organs_to_process:
+
         matched_key = next(
             (k for k in available_segs.keys() if organ.lower() in k.lower()),
             None
         )
+
         if matched_key is None:
             print(f"⚠️ {organ} not found.")
             continue
 
         seg_img = available_segs[matched_key]
+
         # Align segmentation → PET geometry
         if pet_sitk is not None:
             aligned_seg = sitk.Resample(
@@ -167,8 +205,20 @@ def PET_Organ_Cropper(
 
         seg_np = sitk.GetArrayFromImage(aligned_seg)
 
+        # --------------------------------------------------
+        #  Crop aorta according to L2 vertebrae
+        # --------------------------------------------------
+
+        if organ.lower() == "aorta" and l2_z_range is not None:
+            z_min_l2, z_max_l2 = l2_z_range
+
+            seg_np = seg_np.copy()
+            seg_np[:z_min_l2] = 0
+            seg_np[z_max_l2 + 1:] = 0
+
         # Compute bounding box
         non_zero = np.argwhere(seg_np > 0)
+
         if non_zero.size == 0:
             print(f"⚠️ {organ} mask empty.")
             continue
