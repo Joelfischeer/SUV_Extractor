@@ -7,6 +7,7 @@ if __name__ == "__main__":
 
     #Data Directories:
     imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
+   # imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
     output_path = Path("../Results/Healthy_Test_Retest_First_Scan")
 
@@ -31,13 +32,13 @@ if __name__ == "__main__":
         "Colon": "colon",
         "Duodenum": "duodenum",
         "Heart": "heart",
-        "Small_Bowel": "small_intestine",
-        "Kidney": "kidneys",
+        "intestine": "small_intestine",
+        "Kidneys": "kidneys",
         "Liver": "liver",
         "Pancreas": "pancreas",
         "Spleen": "spleen",
         "Stomach": "stomach",
-        "Thyroid": "thyroid_gland"
+        "Thyroid": "Thyroids"
     }
 
     rename = {'small_bowel': 'small_intestine'}
@@ -115,9 +116,10 @@ if __name__ == "__main__":
     results_saver(all_results, output_path)
 
     combined_df = compare_manual_automatic(
-    auto_results_csv=output_path / "Manual_vs_automatic_SUVs.csv",
-    manual_csv="..data/Human FDG whole body healthycohort anon.csv",
-    translator=translator
+    auto_results_csv= f"{output_path}_SUVs.csv",
+    manual_csv="../data/Human FDG whole body healthycohort anon.csv",
+    translator=translator,
+    output_path=output_path
 )
         
 

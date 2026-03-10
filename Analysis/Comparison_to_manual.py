@@ -1,82 +1,161 @@
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 
 
-
-def compare_manual_automatic(auto_results_csv, manual_csv, translator):
-    """
-    Compare automatic SUV extraction with manual extraction.
-
-    Parameters
-    ----------
-    auto_results_csv : str or Path
-        CSV produced by the automatic pipeline.
-    manual_csv : str or Path
-        CSV containing manual measurements.
-    translator : dict
-        Mapping manual organ names -> automatic organ names.
-    """
+def compare_manual_automatic(auto_results_csv, manual_csv, translator, output_path):
 
     # -----------------------
-    # Load automatic results
+    # Load CSVs
     # -----------------------
-    auto_df = pd.read_csv(auto_results_csv)
-
-    # -----------------------
-    # Load manual results
-    # -----------------------
+    auto_df = pd.read_csv(auto_results_csv, sep=";")
     manual_df = pd.read_csv(manual_csv)
 
-    # Filter only Quadra scan 1
+    # -----------------------
+    # Filter manual dataset
+    # -----------------------
     manual_df = manual_df[
         (manual_df["Scanner"] == "Quadra") &
         (manual_df["scan"] == 1)
-    ]
+    ].copy()
 
     # -----------------------
-    # Rename manual organs
+    # Match patient IDs
+    # -----------------------
+    manual_df["Patient"] = manual_df["Patient Name"].str.replace("Quadra", "HTRA")
+
+    # -----------------------
+    # Rename organs
     # -----------------------
     manual_df = manual_df.rename(columns=translator)
 
-    organs = list(translator.values())
+    # -----------------------
+    # Detect common organs
+    # -----------------------
+    auto_organs = set(auto_df.columns) - {"Patient"}
+    manual_organs = set(manual_df.columns)
+
+    organs = sorted(auto_organs.intersection(manual_organs))
+
+    print(f"Using organs: {organs}")
 
     # -----------------------
-    # Convert to long format
+    # Long format
     # -----------------------
     auto_long = auto_df.melt(
-        id_vars=["patient_id"],
+        id_vars="Patient",
         value_vars=organs,
         var_name="organ",
         value_name="SUV"
     )
-    auto_long["source"] = "automatic"
 
     manual_long = manual_df.melt(
+        id_vars="Patient",
         value_vars=organs,
         var_name="organ",
         value_name="SUV"
     )
-    manual_long["source"] = "manual"
-
-    # Combine
-    combined_df = pd.concat([auto_long, manual_long], ignore_index=True)
 
     # -----------------------
-    # Plot
+    # Pairwise merge
     # -----------------------
-    plt.figure(figsize=(12, 6))
+    paired = pd.merge(
+        auto_long,
+        manual_long,
+        on=["Patient", "organ"],
+        suffixes=("_auto", "_manual")
+    )
+
+    # -----------------------
+    # Boxplot comparison
+    # -----------------------
+    combined = pd.concat([
+        auto_long.assign(source="automatic"),
+        manual_long.assign(source="manual")
+    ])
+
+    plt.figure(figsize=(12,6))
 
     sns.boxplot(
-        data=combined_df,
+        data=combined,
         x="organ",
         y="SUV",
         hue="source"
     )
 
     plt.xticks(rotation=45)
-    plt.title("Automatic vs Manual SUV Extraction")
+    plt.title("Manual vs Automatic SUV Extraction")
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"{output_path}_Manual_vs_automatic_SUVs_boxplot")
+    plt.close()
 
-    return combined_df
+    # -----------------------
+    # Validation figure
+    # -----------------------
+    unique_organs = paired["organ"].unique()
+    n = len(unique_organs)
+
+    fig, axes = plt.subplots(2, n, figsize=(4*n, 8))
+
+    results = []
+
+    for i, organ in enumerate(unique_organs):
+
+        subset = paired[paired["organ"] == organ]
+
+        auto = subset["SUV_auto"]
+        manual = subset["SUV_manual"]
+
+        r = auto.corr(manual)
+
+        diff = auto - manual
+        mean = (auto + manual) / 2
+        bias = diff.mean()
+        loa_low = bias - 1.96 * diff.std()
+        loa_high = bias + 1.96 * diff.std()
+
+        results.append({
+            "organ": organ,
+            "pearson_r": r,
+            "bias_auto_minus_manual": bias,
+            "loa_lower": loa_low,
+            "loa_upper": loa_high
+        })
+
+        # Scatter
+        ax = axes[0, i]
+        sns.regplot(x=manual, y=auto, ax=ax)
+
+        lims = [
+            min(manual.min(), auto.min()),
+            max(manual.max(), auto.max())
+        ]
+        ax.plot(lims, lims, '--')
+
+        ax.set_title(f"{organ}\nr={r:.2f}")
+        ax.set_xlabel("Manual SUV")
+        ax.set_ylabel("Automatic SUV")
+
+        # Bland-Altman
+        ax = axes[1, i]
+
+        ax.scatter(mean, diff)
+        ax.axhline(bias, linestyle="--")
+        ax.axhline(loa_low, linestyle=":")
+        ax.axhline(loa_high, linestyle=":")
+
+        ax.set_title(f"{organ}\nBias={bias:.2f}")
+        ax.set_xlabel("Mean SUV")
+        ax.set_ylabel("Auto − Manual")
+
+    plt.tight_layout()
+    plt.savefig(f"{output_path}_Manual_vs_automatic_SUVs_correlation")
+    plt.close()
+
+    stats_df = pd.DataFrame(results)
+
+    print("\nPairwise statistics:")
+    print(stats_df)
+
+    return combined, paired, stats_df
