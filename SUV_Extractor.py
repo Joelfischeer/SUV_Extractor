@@ -27,6 +27,19 @@ if __name__ == "__main__":
         'thyroid_gland'
     ]
 
+    translator = {
+        "Colon": "colon",
+        "Duodenum": "duodenum",
+        "Heart": "heart",
+        "Small_Bowel": "small_intestine",
+        "Kidney": "kidneys",
+        "Liver": "liver",
+        "Pancreas": "pancreas",
+        "Spleen": "spleen",
+        "Stomach": "stomach",
+        "Thyroid": "thyroid_gland"
+    }
+
     rename = {'small_bowel': 'small_intestine'}
 
     combination_logic = {
@@ -57,6 +70,7 @@ if __name__ == "__main__":
     from Image_loading.Image_Loader import PET_Organ_Cropper
     from Analysis.SUV_calculation import compute_suv, convert_pet_to_suv
     from Results_saving.results_saver import results_saver
+    from Analysis.Comparison_to_manual import compare_manual_automatic
 
     all_results = []
 
@@ -99,6 +113,12 @@ if __name__ == "__main__":
 
     # Save CSV
     results_saver(all_results, output_path)
+
+    combined_df = compare_manual_automatic(
+    auto_results_csv=output_path / "Manual_vs_automatic_SUVs.csv",
+    manual_csv="..data/Human FDG whole body healthycohort anon.csv",
+    translator=translator
+)
         
 
 
