@@ -76,43 +76,53 @@ if __name__ == "__main__":
     all_results = []
 
     for patient in patients:
-        #Get the folder with the PET DISOMs inside
         patient_dir = imgdir / patient
         pet_folder = next(
             p for p in patient_dir.iterdir()
             if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
         )
-        #Convert to SUV image
-        try:
-            pet_suv = convert_pet_to_suv(pet_folder)
-        except Exception as e:
-            print(f"⚠️ Could not load PET for {patient}: {e}")
-            continue
         
-        # Crop organs (returns dict of organ_name -> np.array of SUV values)
-        PET_organs = PET_Organ_Cropper(
-            data_dir=imgdir,
-            patient=patient,
-            organs_of_interest=organs_of_interest,
-            combination_logic=combination_logic,
-            custom_pet_array=pet_suv  
-        )
+        try:
+            # 1. Convert to calibrated SUV (Bq/ml → SUV)
+            pet_suv_raw = convert_pet_to_suv(pet_folder)  # Raw SUV
+            
+            # 2. ONE-TIME aorta normalization for entire PET image
+            PET_organs_raw = PET_Organ_Cropper(
+                data_dir=imgdir,
+                patient=patient,
+                organs_of_interest=organs_of_interest + ['aorta'],  # Include aorta!
+                combination_logic=combination_logic,
+                custom_pet_array=pet_suv_raw
+            )
+            
+            if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
+                print(f"⚠️ No valid aorta for {patient}")
+                continue
+                
+            # Compute aorta reference ONCE
+            aorta_reference = np.mean(PET_organs_raw["aorta"][PET_organs_raw["aorta"] > 0])
+            print(f"Aorta reference: {aorta_reference:.3f}")
+            
+            # 3. Apply normalization to ALL organ crops at once
+            PET_organs_normalized = {}
+            for organ, organ_array in PET_organs_raw.items():
+                PET_organs_normalized[organ] = organ_array / aorta_reference
+            
+            # 4. Compute final stats (already normalized)
+            patient_result = compute_suv(
+                PET_organs_normalized,
+                organs_of_interest,
+                patient_id=patient
+            )
+            
+            if patient_result:
+                all_results.append(patient_result)
+                
+        except Exception as e:
+            print(f"❌ Error {patient}: {e}")
+            continue
 
-        # Compute normalized SUV
-        patient_result = compute_suv(
-            PET_organs,
-            organs_of_interest,
-            patient_id=patient
-        )
-
-        #Rename the columns which the TotalSegmentator names differently:
-        patient_result = {rename.get(k, k): v for k, v in patient_result.items()}
-
-        #Store the results:
-        if patient_result is not None:
-            all_results.append(patient_result)
-
-    # Save CSV
+    # Save results
     results_saver(all_results, output_path)
 
     combined_df = compare_manual_automatic(
