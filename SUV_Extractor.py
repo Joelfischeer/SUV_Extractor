@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from tqdm import tqdm as tqdm
 import gc
+import numpy as np
 
 if __name__ == "__main__":
 
@@ -82,45 +83,54 @@ if __name__ == "__main__":
             if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
         )
         
-        try:
-            # 1. Convert to calibrated SUV (Bq/ml → SUV)
-            pet_suv_raw = convert_pet_to_suv(pet_folder)  # Raw SUV
-            
-            # 2. ONE-TIME aorta normalization for entire PET image
-            PET_organs_raw = PET_Organ_Cropper(
-                data_dir=imgdir,
-                patient=patient,
-                organs_of_interest=organs_of_interest + ['aorta'],  # Include aorta!
-                combination_logic=combination_logic,
-                custom_pet_array=pet_suv_raw
-            )
-            
-            if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
-                print(f"⚠️ No valid aorta for {patient}")
-                continue
-                
-            # Compute aorta reference ONCE
-            aorta_reference = np.mean(PET_organs_raw["aorta"][PET_organs_raw["aorta"] > 0])
-            print(f"Aorta reference: {aorta_reference:.3f}")
-            
-            # 3. Apply normalization to ALL organ crops at once
-            PET_organs_normalized = {}
-            for organ, organ_array in PET_organs_raw.items():
-                PET_organs_normalized[organ] = organ_array / aorta_reference
-            
-            # 4. Compute final stats (already normalized)
-            patient_result = compute_suv(
-                PET_organs_normalized,
-                organs_of_interest,
-                patient_id=patient
-            )
-            
-            if patient_result:
-                all_results.append(patient_result)
-                
-        except Exception as e:
-            print(f"❌ Error {patient}: {e}")
+        #try:
+        # 1. Convert to calibrated SUV (Bq/ml → SUV)
+        pet_suv_raw = convert_pet_to_suv(pet_folder)  # Raw SUV
+        
+        # 2. ONE-TIME aorta normalization for entire PET image
+        organs_of_interest_and_L1 = organs_of_interest + ['aorta'] + ['vertebrae_L1']
+        PET_organs_raw = PET_Organ_Cropper(
+            data_dir=imgdir,
+            patient=patient,
+            organs_of_interest=organs_of_interest_and_L1,  # Include aorta and vertebrae L1
+            combination_logic=combination_logic,
+            custom_pet_array=pet_suv_raw
+        )
+        
+        if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
+            print(f"⚠️ No valid aorta for {patient}")
             continue
+
+        if "vertebrae_L1" not in PET_organs_raw or np.sum(PET_organs_raw["vertebrae_L1"] > 0) == 0:
+            print(f"⚠️ No valid vertebrae_L1 for {patient}")
+            continue
+        
+        # Compute aorta reference
+        from Analysis.Normalization_to_aorta import aorta_normalization
+        aorta_reference = aorta_normalization(PET_organs_raw)
+
+
+        aorta_reference = np.mean(PET_organs_raw["aorta"][PET_organs_raw["aorta"] > 0])
+        print(f"Aorta reference: {aorta_reference:.3f}")
+        
+        # 3. Apply normalization to ALL organ crops at once
+        PET_organs_normalized = {}
+        for organ, organ_array in PET_organs_raw.items():
+            PET_organs_normalized[organ] = organ_array / aorta_reference
+        
+        # 4. Compute final stats (already normalized)
+        patient_result = compute_suv(
+            PET_organs_normalized,
+            organs_of_interest=organs_of_interest + ['aorta'],
+            patient_id=patient
+        )
+        
+        if patient_result:
+            all_results.append(patient_result)
+                
+        #except Exception as e:
+        #    print(f"❌ Error {patient}: {e}")
+        #    continue
 
     # Save results
     results_saver(all_results, output_path)
