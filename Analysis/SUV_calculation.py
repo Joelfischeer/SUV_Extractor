@@ -31,7 +31,8 @@ def convert_pet_to_suv(pet_folder: Path):
     reader.SetFileNames(dicom_names)
     pet_sitk = reader.Execute()
     
-    # ✅ PER-SLICE RescaleSlope + Intercept → Bq/ml
+    # PER-SLICE RescaleSlope + Intercept → Bq/ml
+    # Slice wise SUV values do not differ as 3D ones do depending on how the 3D image is created.
     pet_array = np.zeros(sitk.GetArrayFromImage(pet_sitk).shape, dtype=np.float32)
     for i, fname in enumerate(dicom_names):
         slice_ds = pydicom.dcmread(fname, force=True)
