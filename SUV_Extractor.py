@@ -26,28 +26,38 @@ if __name__ == "__main__":
         'pancreas',
         'spleen',
         'stomach',
-        'thyroid_gland'
+        'thyroid_gland',
+        'brain',
+        'muscle',
+        'thyroids'
     ]
 
     translator = {
-        "Colon": "colon",
-        "Duodenum": "duodenum",
-        "Heart": "heart",
-        "intestine": "small_intestine",
-        "Kidneys": "kidneys",
-        "Liver": "liver",
-        "Pancreas": "pancreas",
-        "Spleen": "spleen",
-        "Stomach": "stomach",
-        "Thyroid": "Thyroids"
+        "colon cb": "colon",
+        "duodenum cb": "duodenum",
+        "heart cB": "heart",
+        "intest cB": "small_intestine",
+        "Kidneys cB": "kidneys",
+        "liver cB": "liver",
+        "pancreas cB": "pancreas",
+        "spleen cB": "spleen",
+        "stomach cB": "stomach",
+        "Thyroids cB": "thyroids",
+        'brain cB': 'brain',
+        'Lungs cB': 'lungs',
+        'glut cB': 'muscle',
+        'bladder cB': 'bladder',
+        'fat visc cB': 'fat'
     }
 
-    rename = {'small_bowel': 'small_intestine'}
+    rename = {'small_bowel': 'small_intestine',
+              'thyroid_gland': 'thyroids'}
 
     combination_logic = {
     'lungs': ['lung_lower_lobe_left', 'lung_middle_lobe_left', 'lung_upper_lobe_left','lung_lower_lobe_right', 'lung_middle_lobe_right', 'lung_upper_lobe_right'],
     'adrenal_glands': ['adrenal_gland_left', 'adrenal_gland_right'],
-    'kidneys' : ['kidney_left', 'kidney_right']
+    'kidneys' : ['kidney_left', 'kidney_right'],
+    'muscle': ['gluteus_maximus_right', 'gluteus_maximus_left']
     }
 
         #If segmentation is needed:
@@ -83,7 +93,7 @@ if __name__ == "__main__":
             if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
         )
         
-        #try:
+
         # 1. Convert to calibrated SUV (Bq/ml → SUV)
         pet_suv_raw = convert_pet_to_suv(pet_folder)  # Raw SUV
         
@@ -97,6 +107,9 @@ if __name__ == "__main__":
             custom_pet_array=pet_suv_raw
         )
         
+        # 3. Apply renaming:
+        PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
+
         if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
             print(f"⚠️ No valid aorta for {patient}")
             continue
@@ -105,20 +118,17 @@ if __name__ == "__main__":
             print(f"⚠️ No valid vertebrae_L1 for {patient}")
             continue
         
-        # Compute aorta reference
+        # 4. Compute aorta reference
         from Analysis.Normalization_to_aorta import aorta_normalization
         aorta_reference = aorta_normalization(PET_organs_raw)
+        print(aorta_reference)
 
-
-        aorta_reference = np.mean(PET_organs_raw["aorta"][PET_organs_raw["aorta"] > 0])
-        print(f"Aorta reference: {aorta_reference:.3f}")
-        
-        # 3. Apply normalization to ALL organ crops at once
+        # 5. Apply normalization to ALL organ crops at once
         PET_organs_normalized = {}
         for organ, organ_array in PET_organs_raw.items():
             PET_organs_normalized[organ] = organ_array / aorta_reference
         
-        # 4. Compute final stats (already normalized)
+        # 6. Compute final stats (already normalized)
         patient_result = compute_suv(
             PET_organs_normalized,
             organs_of_interest=organs_of_interest + ['aorta'],
@@ -128,16 +138,13 @@ if __name__ == "__main__":
         if patient_result:
             all_results.append(patient_result)
                 
-        #except Exception as e:
-        #    print(f"❌ Error {patient}: {e}")
-        #    continue
 
     # Save results
     results_saver(all_results, output_path)
 
     combined_df = compare_manual_automatic(
     auto_results_csv= f"{output_path}_SUVs.csv",
-    manual_csv="../data/Human FDG whole body healthycohort anon.csv",
+    manual_csv="../data/Quadra_test_retest.csv",
     translator=translator,
     output_path=output_path
 )
