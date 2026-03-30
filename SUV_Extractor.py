@@ -63,17 +63,16 @@ if __name__ == "__main__":
 
     erosion_config = {
             'aorta': 1,
-            'liver': 2,
-            'kidneys': 3,
-            'spleen': 2,
-            'heart': 2,
-            'colon': 5,
-            'duodenum': 3,
-            'small_bowel': 2,
-            'stomach': 2,
-            'pancreas': 2,
-            'thyroid_gland': 0,
-            'thyroids': 0,
+            'liver': 1,
+            'kidneys': 1,
+            'spleen': 1,
+            'heart': 1,
+            'colon': 1,
+            'duodenum': 1,
+            'small_bowel': 1,
+            'stomach': 1,
+            'pancreas': 1,
+            'thyroids': 1,
             'brain': 1,
             'muscle': 1,
             'DEFAULT': 1
@@ -101,7 +100,7 @@ if __name__ == "__main__":
     )
 
     from Image_loading.Image_Loader import PET_Organ_Cropper
-    from Analysis.SUV_calculation import compute_suv, convert_pet_to_suv
+    from Analysis.SUV_calculation import compute_suv
     from Results_saving.results_saver import results_saver
     from Analysis.Comparison_to_manual import compare_manual_automatic
     from Analysis.Normalization_to_aorta import aorta_normalization
@@ -117,17 +116,13 @@ if __name__ == "__main__":
         )
         
 
-        # 1. Convert to calibrated SUV (Bq/ml → SUV)
-        pet_suv_raw = convert_pet_to_suv(pet_folder)  # Raw SUV
-        
         # 2. Load Cropped organs:
         organs_of_interest_and_L1 = organs_of_interest + ['aorta'] + ['vertebrae_L1']
         PET_organs_raw = PET_Organ_Cropper(
             data_dir=imgdir,
             patient=patient,
             organs_of_interest=organs_of_interest_and_L1,  # Include aorta and vertebrae L1
-            combination_logic=combination_logic,
-            custom_pet_array=pet_suv_raw
+            combination_logic=combination_logic
         )
         
         # 3 Remvove pixels around each organ to remove contamination from bad segmentation:

@@ -7,48 +7,6 @@ import pydicom
 import math
 
 
-def convert_pet_to_suv(pet_folder: Path):
-    """Load PET series and convert to Bq/ml with per-slice RescaleSlope/Intercept."""
-    
-    # Metadata from first DICOM
-    dicom_files = list(pet_folder.glob("*.dcm"))
-    ds = pydicom.dcmread(dicom_files[0], force=True)
-    weight_g = ds.PatientWeight * 1000
-    rad_info = ds.RadiopharmaceuticalInformationSequence[0]
-    injected_dose = rad_info.RadionuclideTotalDose
-    half_life = rad_info.RadionuclideHalfLife
-    
-
-    def dicom_time_to_seconds(t):
-        return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
-    
-    delta_t = dicom_time_to_seconds(ds.AcquisitionTime) - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
-    lambda_decay = math.log(2) / half_life
-    decay_corrected_dose = (injected_dose * math.exp(-lambda_decay * delta_t))/1000 #Divide by 1000 to get MBq
-
-    # Load full PET series
-    reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(str(pet_folder))
-    reader.SetFileNames(dicom_names)
-    pet_sitk = reader.Execute()
-    
-    # PER-SLICE RescaleSlope + Intercept → Bq/ml
-    # Slice wise SUV values do not differ as 3D ones do depending on how the 3D image is created.
-    pet_array = np.zeros(sitk.GetArrayFromImage(pet_sitk).shape, dtype=np.float32)
-    for i, fname in enumerate(dicom_names):
-        slice_ds = pydicom.dcmread(fname, force=True)
-        slope = float(slice_ds.RescaleSlope) if 'RescaleSlope' in slice_ds else 1.0
-        intercept = float(slice_ds.RescaleIntercept) if 'RescaleIntercept' in slice_ds else 0.0
-        
-        slice_raw = sitk.GetArrayFromImage(pet_sitk)[i,:,:]
-        slice_calibrated = (slice_raw * slope + intercept)  # Bq/ml ✓
-        pet_array[i,:,:] = slice_calibrated
-    
-    # Convert MBq/ml → SUV
-    suv_array = pet_array * weight_g / decay_corrected_dose
-    return suv_array
-
-
 def compute_suv(
     organ_dict,
     organs_of_interest,
