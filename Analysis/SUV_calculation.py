@@ -26,11 +26,6 @@ def convert_pet_to_suv(pet_folder: Path):
     lambda_decay = math.log(2) / half_life
     decay_corrected_dose = (injected_dose * math.exp(-lambda_decay * delta_t))/1000 #Divide by 1000 to get MBq
 
-    
-    print(f"Weight: {weight_g/1000:.1f} kg")
-    print(f"Dose: {injected_dose:.0f} Bq")
-    print(f"Decay corrected: {decay_corrected_dose:.0f} MBq")
-
     # Load full PET series
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(str(pet_folder))

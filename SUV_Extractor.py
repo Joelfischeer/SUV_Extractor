@@ -64,19 +64,19 @@ if __name__ == "__main__":
     erosion_config = {
             'aorta': 1,
             'liver': 2,
-            'kidneys': 2,
+            'kidneys': 3,
             'spleen': 2,
             'heart': 2,
-            'colon': 3,
+            'colon': 5,
             'duodenum': 3,
-            'small_bowel': 3,
-            'stomach': 3,
-            'pancreas': 3,
-            'thyroid_gland': 2,
-            'thyroids': 2,
-            'brain': 2,
+            'small_bowel': 2,
+            'stomach': 2,
+            'pancreas': 2,
+            'thyroid_gland': 0,
+            'thyroids': 0,
+            'brain': 1,
             'muscle': 1,
-            'DEFAULT': 2
+            'DEFAULT': 1
         }
     
 
