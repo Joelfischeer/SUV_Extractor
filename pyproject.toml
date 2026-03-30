@@ -10,6 +10,7 @@ dependencies = [
     "path>=17.1.1",
     "pydicom>=3.0.1",
     "requests>=2.32.5",
+    "scipy>=1.17.1",
     "seaborn>=0.13.2",
     "simpleitk>=2.5.3",
     "tqdm>=4.67.3",

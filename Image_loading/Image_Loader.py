@@ -239,3 +239,74 @@ def PET_Organ_Cropper(
     gc.collect()
 
     return cropped_organs
+
+
+from scipy.ndimage import binary_erosion
+import numpy as np
+
+def erode_organ_masks(organ_dict, erosion_config=None):
+    """
+    Apply per-organ boundary erosion to exclude segmentation edge contamination.
+    
+    Args:
+        organ_dict: dict of {organ_name: cropped_pet_array}
+        erosion_config: dict {organ: voxels_to_erode} or None for defaults
+    
+    Returns:
+        eroded_organs: dict with eroded masks applied to PET values
+    """
+    if erosion_config is None:
+        erosion_config = {
+            'aorta': 1,
+            'vertebrae_L1': 1, 
+            'liver': 2,
+            'kidneys': 2,
+            'spleen': 2,
+            'heart': 2,
+            'colon': 3,
+            'duodenum': 3,
+            'small_bowel': 3,
+            'stomach': 3,
+            'pancreas': 3,
+            'thyroid_gland': 2,
+            'thyroids': 2,
+            'brain': 2,
+            'muscle': 1,
+            'DEFAULT': 2
+        }
+    
+    eroded_organs = {}
+    
+    for organ, pet_crop in organ_dict.items():
+        voxels_to_erode = erosion_config.get(organ, erosion_config['DEFAULT'])
+        
+        # ✅ FIXED: Create mask from original 3D array
+        binary_mask = pet_crop > 0
+        
+        orig_voxels = np.sum(binary_mask)
+        if orig_voxels == 0:
+            print(f"⚠️ {organ}: empty mask, skipping")
+            eroded_organs[organ] = pet_crop
+            continue
+        
+        # Erode the BINARY mask (stays 3D)
+        eroded_binary = binary_erosion(
+            binary_mask, 
+            structure=np.ones((3,3,3)),
+            iterations=voxels_to_erode
+        )
+        
+        # ✅ FIXED: Use eroded_binary to index original 3D pet_crop directly
+        eroded_crop = np.zeros_like(pet_crop)
+        eroded_crop[eroded_binary] = pet_crop[eroded_binary]  # ← Direct 3D→3D indexing
+        
+        new_voxels = np.sum(eroded_binary)
+        reduction_pct = 100 * (1 - new_voxels / orig_voxels)
+        
+        eroded_organs[organ] = eroded_crop
+        
+        print(f"  {organ:<12} {orig_voxels:>6,} → {new_voxels:>6,} voxels "
+              f"({reduction_pct:>4.1f}% eroded, {voxels_to_erode}v)")
+    
+    print(f"  Average reduction: {len(organ_dict)} organs processed\n")
+    return eroded_organs

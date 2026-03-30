@@ -18,13 +18,19 @@ def convert_pet_to_suv(pet_folder: Path):
     injected_dose = rad_info.RadionuclideTotalDose
     half_life = rad_info.RadionuclideHalfLife
     
+
     def dicom_time_to_seconds(t):
         return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
     
     delta_t = dicom_time_to_seconds(ds.AcquisitionTime) - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
     lambda_decay = math.log(2) / half_life
-    decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
+    decay_corrected_dose = (injected_dose * math.exp(-lambda_decay * delta_t))/1000 #Divide by 1000 to get MBq
+
     
+    print(f"Weight: {weight_g/1000:.1f} kg")
+    print(f"Dose: {injected_dose:.0f} Bq")
+    print(f"Decay corrected: {decay_corrected_dose:.0f} MBq")
+
     # Load full PET series
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(str(pet_folder))
@@ -40,10 +46,10 @@ def convert_pet_to_suv(pet_folder: Path):
         intercept = float(slice_ds.RescaleIntercept) if 'RescaleIntercept' in slice_ds else 0.0
         
         slice_raw = sitk.GetArrayFromImage(pet_sitk)[i,:,:]
-        slice_calibrated = slice_raw * slope + intercept  # Bq/ml ✓
+        slice_calibrated = (slice_raw * slope + intercept)  # Bq/ml ✓
         pet_array[i,:,:] = slice_calibrated
     
-    # Convert Bq/ml → SUV
+    # Convert MBq/ml → SUV
     suv_array = pet_array * weight_g / decay_corrected_dose
     return suv_array
 
