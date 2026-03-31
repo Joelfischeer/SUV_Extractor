@@ -32,25 +32,21 @@ if __name__ == "__main__":
         'thyroids'
     ]
 
-    translator = {
-        "colon cb": "colon",
-        "duodenum cb": "duodenum",
-        "heart cB": "heart",
-        "intest cB": "small_intestine",
-        "Kidneys cB": "kidneys",
-        "liver cB": "liver",
-        "pancreas cB": "pancreas",
-        "spleen cB": "spleen",
-        "stomach cB": "stomach",
-        "Thyroids cB": "thyroids",
-        'brain cB': 'brain',
-        'Lungs cB': 'lungs',
-        'glut cB': 'muscle',
-        'bladder cB': 'bladder',
-        'fat visc cB': 'fat'
-    }
-
-    rename = {'small_bowel': 'small_intestine',
+    translator = {'brain cB': 'brain', 
+            'liver cB': 'liver', 
+            'pancreas cB': 'pancreas',
+            'spleen cB': 'spleen', 
+            'stomach cB': 'stomach', 
+            'bladder cB': 'bladder',
+            'heart cB': 'heart', 
+            'intest cB': 'small_intestine',
+            'glut cB': 'muscle',
+            'Kidneys cB': 
+            'kidneys', 'Lungs cB': 'lungs',
+            'Thyroids cB': 'thyroids',
+            'Adr Gl cB': 'adrenal_glands'}
+    
+    rename = {'duodenum': 'small_intestine',
               'thyroid_gland': 'thyroids'}
 
     combination_logic = {
@@ -162,7 +158,8 @@ if __name__ == "__main__":
         if patient_result:
             all_results.append(patient_result)
 
-                
+
+               
     
     # Save results
     results_saver(all_results, output_path)
@@ -171,6 +168,7 @@ if __name__ == "__main__":
     auto_results_csv= f"{output_path}_SUVs.csv",
     manual_csv="../data/Quadra_test_retest.csv",
     translator=translator,
+    rename = rename,
     output_path=output_path
 )
         

@@ -5,33 +5,24 @@ import numpy as np
 
 
 
-def compare_manual_automatic(auto_results_csv, manual_csv, translator, output_path):
+def compare_manual_automatic(auto_results_csv, manual_csv, translator, rename, output_path):
+
+
     # Load CSVs
     auto_df = pd.read_csv(auto_results_csv, sep=";", decimal=',')
     manual_df = pd.read_csv(manual_csv, decimal=',')
-    
+
+    #Remove empty columns:
+    auto_df.dropna(axis=1, how='all', inplace=True)
+
+
     # Convert auto organs to numeric
     auto_organs = [col for col in auto_df.columns if col not in ["Patient"]]
     for col in auto_organs:
         auto_df[col] = pd.to_numeric(auto_df[col], errors='coerce')
-    
-    rename = {'brain cB': 'brain', 
-              'liver cB': 'liver', 
-              'pancreas cB': 'pancreas',
-              'spleen cB': 'spleen', 
-              'stomach cB': 'stomach', 
-              'bladder cB': 'bladder',
-              'heart cB': 'heart', 
-              'intest cB': 'small_intestine', 
-              'glut cB': 'muscle',
-              'Kidneys cB': 
-              'kidneys', 'Lungs cB': 'lungs', ''
-              'Thyroids cB': 'thyroids',
-              'Adr Gl cB': 'adrenal_glands'}
 
-    # ------------------- FIXED: Convert BEFORE renaming -------------------
     # Keep original manual organ columns + Patient
-    manual_organs_raw = list(rename.keys())
+    manual_organs_raw = list(translator.keys())
     keep_columns_raw = ['Image_ID'] + manual_organs_raw
     manual_df_raw = manual_df[keep_columns_raw].copy()
     
@@ -40,17 +31,23 @@ def compare_manual_automatic(auto_results_csv, manual_csv, translator, output_pa
         if col in manual_df_raw.columns:
             manual_df_raw[col] = pd.to_numeric(manual_df_raw[col], errors='coerce')
     
-    # NOW rename safely
-    manual_df_clean = manual_df_raw.rename(columns={**rename, 'Image_ID': 'Patient'})
+    # rename if the columns are present:
+    manual_df_clean = manual_df_raw.rename(
+    columns={k: v for k, v in {**translator, 'Image_ID': 'Patient'}.items() 
+             if k in manual_df_raw.columns}
+    )
+    auto_df_clean = auto_df.rename(
+        columns={k: v for k, v in rename.items() if k in auto_df.columns}
+    )
 
-    # ------------------- Create comparison dataframe -------------------
-    comparison_df = auto_df[['Patient']].copy()
-    common_patients = set(auto_df['Patient']) & set(manual_df_clean['Patient'])
-    auto_matched = auto_df[auto_df['Patient'].isin(common_patients)].set_index('Patient')
+    # Create comparison dataframe
+    comparison_df = pd.DataFrame({'Patient': auto_df_clean['Patient']}).copy()
+    common_patients = set(auto_df_clean['Patient']) & set(manual_df_clean['Patient'])
+    auto_matched = auto_df_clean[auto_df_clean['Patient'].isin(common_patients)].set_index('Patient')
     manual_matched = manual_df_clean[manual_df_clean['Patient'].isin(common_patients)].set_index('Patient')
     
-    for manual_col, auto_col in rename.items():
-        if auto_col in auto_df.columns and auto_col in manual_matched.columns:
+    for manual_col, auto_col in translator.items():
+        if auto_col in auto_df_clean.columns and auto_col in manual_matched.columns:
             comparison_df.loc[comparison_df['Patient'].isin(common_patients), f'{auto_col}_auto'] = auto_matched[auto_col].values
             comparison_df.loc[comparison_df['Patient'].isin(common_patients), f'{auto_col}_manual'] = manual_matched[auto_col].values
 
