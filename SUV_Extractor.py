@@ -7,10 +7,10 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    #imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
-    imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
+    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_Second_Scan")
+    #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
-    output_path = Path("../Results/Healthy_Test_Retest_First_Scan")
+    output_path = Path("../Results/Healthy_Test_Retest_Second_Scan")
 
     #Do we need to segmentate the images?
     SEGMENTATE = False
@@ -126,10 +126,10 @@ if __name__ == "__main__":
         )
         
         # 3 Remvove pixels around each organ to remove contamination from bad segmentation:
-        PET_organs_raw = erode_organ_masks(
-            PET_organs_raw, 
-            erosion_config=erosion_config 
-        )
+        #PET_organs_raw = erode_organ_masks(
+        #    PET_organs_raw, 
+        #    erosion_config=erosion_config 
+        #)
 
         # 4. Apply renaming:
         PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}

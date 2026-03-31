@@ -3,8 +3,7 @@ def PET_Organ_Cropper(
     data_dir,
     patient,
     organs_of_interest,
-    combination_logic=None,
-    custom_pet_array=None
+    combination_logic=None
 ):
     """
     Load PET (+ geometry).
@@ -51,52 +50,47 @@ def PET_Organ_Cropper(
     pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
 
     # --------------------------------------------------
-    # Convert PET → SUV if not provided
+    # Convert PET → SUV (volume wise)
     # --------------------------------------------------
-    pet_np = custom_pet_array
 
-    if pet_np is None:
-        dicom_files = list(Path(pet_folder).glob("*.dcm"))
-        if len(dicom_files) == 0:
-            print("⚠️ No PET DICOMs found.")
-            return None
+    dicom_files = list(Path(pet_folder).glob("*.dcm"))
+    if len(dicom_files) == 0:
+        print("⚠️ No PET DICOMs found.")
+        return None
 
-        ds = pydicom.dcmread(dicom_files[0], force=True)
+    # ✅ VOLUME-WISE: Use REFERENCE slice for ALL parameters
+    ref_ds = pydicom.dcmread(dicom_files[0], force=True)
+    weight_g = ref_ds.PatientWeight * 1000
+    rad_info = ref_ds.RadiopharmaceuticalInformationSequence[0]
+    injected_dose = rad_info.RadionuclideTotalDose
+    half_life = rad_info.RadionuclideHalfLife
 
-        weight_g = ds.PatientWeight * 1000
-        rad_info = ds.RadiopharmaceuticalInformationSequence[0]
-        injected_dose = rad_info.RadionuclideTotalDose
-        half_life = rad_info.RadionuclideHalfLife
+    def dicom_time_to_seconds(t):
+        return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
 
-        def dicom_time_to_seconds(t):
-            return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
+    # ✅ Single delta_t for entire volume (series-level decay correction)
+    delta_t = (
+        dicom_time_to_seconds(ref_ds.AcquisitionTime)
+        - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
+    )
+    if delta_t < 0:
+        delta_t += 24 * 3600
 
-        delta_t = (
-            dicom_time_to_seconds(ds.AcquisitionTime)
-            - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
-        )
+    lambda_decay = math.log(2) / half_life
+    decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
 
-        if delta_t < 0:
-            delta_t += 24 * 3600
+    # Get raw PET voxel data (SimpleITK handles orientation)
+    pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
 
-        lambda_decay = math.log(2) / half_life
-        decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
+    # ✅ VOLUME-WISE: Single rescale for ENTIRE volume (use reference slice)
+    ref_slope = float(ref_ds.RescaleSlope) if 'RescaleSlope' in ref_ds else 1.0
+    ref_intercept = float(ref_ds.RescaleIntercept) if 'RescaleIntercept' in ref_ds else 0.0
+    
+    # Apply uniform rescale to all voxels
+    pet_concentration = pet_raw * ref_slope + ref_intercept
 
-        # Get PET voxel data
-        pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
-
-        pet_array = np.zeros_like(pet_raw, dtype=np.float32)
-
-        for i, fname in enumerate(dicom_names):
-            slice_ds = pydicom.dcmread(fname, force=True)
-
-            slope = float(slice_ds.RescaleSlope) if 'RescaleSlope' in slice_ds else 1.0
-            intercept = float(slice_ds.RescaleIntercept) if 'RescaleIntercept' in slice_ds else 0.0
-
-            pet_array[i] = pet_raw[i] * slope + intercept
-
-        # SUV
-        pet_np = pet_array * weight_g / decay_corrected_dose
+    # ✅ Final SUV: uniform scaling across entire 3D volume
+    pet_np = pet_concentration * weight_g / decay_corrected_dose
 
     # --------------------------------------------------
     # Load segmentations
@@ -199,7 +193,7 @@ def PET_Organ_Cropper(
 
         seg_np = sitk.GetArrayFromImage(aligned_seg)
 
-        # 🚨 SAFETY CHECK
+        # SAFETY CHECK
         if seg_np.shape != pet_np.shape:
             print(f"❌ Shape mismatch: PET {pet_np.shape} vs SEG {seg_np.shape}")
             continue
