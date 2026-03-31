@@ -7,10 +7,10 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_Second_Scan")
+    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
     #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
-    output_path = Path("../Results/Healthy_Test_Retest_Second_Scan")
+    output_path = Path("../Results/Healthy_Test_Retest_First_Scan")
 
     #Do we need to segmentate the images?
     SEGMENTATE = False
@@ -106,6 +106,7 @@ if __name__ == "__main__":
     from Analysis.Normalization_to_aorta import aorta_normalization
     from Image_loading.Image_Loader import erode_organ_masks
 
+    '''
     all_results = []
 
     for patient in patients:
@@ -160,11 +161,12 @@ if __name__ == "__main__":
         
         if patient_result:
             all_results.append(patient_result)
-                
 
+                
+    
     # Save results
     results_saver(all_results, output_path)
-
+    '''
     combined_df = compare_manual_automatic(
     auto_results_csv= f"{output_path}_SUVs.csv",
     manual_csv="../data/Quadra_test_retest.csv",
