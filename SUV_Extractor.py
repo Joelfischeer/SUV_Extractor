@@ -7,13 +7,15 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
+    imgdir = Path("../../../Data/Magenband/Images")
     #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
-    output_path = Path("../Results/Healthy_Test_Retest_First_Scan")
+    output_path = Path("../../../Data/Magenband")
 
     #Do we need to segmentate the images?
-    SEGMENTATE = False
+    SEGMENTATE_ORGANS = True
+    SEGMENTATE_BODY = True
+    SEGMENTATE_LUNG = True
 
 
     organs_of_interest = [
@@ -77,16 +79,19 @@ if __name__ == "__main__":
 
 
         #If segmentation is needed:
-    if SEGMENTATE == True:
+    if SEGMENTATE_ORGANS or SEGMENTATE_BODY or SEGMENTATE_LUNG:
         from Image_loading.Segmentator import align_and_segment_images
 
-        #Align + Segment
-        align_and_segment_images(
-            data_dir=imgdir,
-            segmentate_organs_ct= SEGMENTATE,
-            segmentate_body_ct= False,
-            fast= False
-        )
+        cohort_folders = [p for p in imgdir.iterdir() if p.is_dir()]
+        for cohort_folder in cohort_folders:
+            align_and_segment_images(
+                data_dir=cohort_folder,
+                segmentate_organs_ct=SEGMENTATE_ORGANS,
+                segmentate_body_ct=SEGMENTATE_BODY,
+                segmentate_lung_ct=SEGMENTATE_LUNG,
+                fast=False
+            )
+    
 
     #Get Patients in the folder:
     patients = sorted(
@@ -102,7 +107,7 @@ if __name__ == "__main__":
     from Analysis.Normalization_to_aorta import aorta_normalization
     from Image_loading.Image_Loader import erode_organ_masks
 
-    '''
+    
     all_results = []
 
     for patient in patients:
@@ -163,7 +168,7 @@ if __name__ == "__main__":
     
     # Save results
     results_saver(all_results, output_path)
-    '''
+    
     combined_df = compare_manual_automatic(
     auto_results_csv= f"{output_path}_SUVs.csv",
     manual_csv="../data/Quadra_test_retest.csv",
