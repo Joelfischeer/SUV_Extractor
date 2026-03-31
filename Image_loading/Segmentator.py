@@ -6,7 +6,11 @@ from pathlib import Path
 import os
 import torch
 
-def TotalSegmentator_dicom_CT(data_root, segmentate_organs_ct, segmentate_body_ct, fast):
+def TotalSegmentator_dicom_CT(data_root, 
+                              segmentate_organs_ct, 
+                              segmentate_body_ct, 
+                              segmentate_lung_ct,
+                              fast):
     """
     Runs TotalSegmentator on all patients in data_root.
     Writes a txt file listing failed patient folders.
@@ -14,23 +18,33 @@ def TotalSegmentator_dicom_CT(data_root, segmentate_organs_ct, segmentate_body_c
 
     data_root = Path(data_root)
     patient_folders = [p for p in data_root.iterdir() if p.is_dir()]
-
     failed_patients = []
 
     for patient_folder in patient_folders:
         print(f"Processing {patient_folder}...")
-
+    
         try:
-            # Collect CT files
-            ct_files = [f for f in patient_folder.iterdir() if "CT" in f.name.upper()]
-            if not ct_files:
-                print(f"⚠️ No CT found for {patient_folder.name}")
-                continue
+            #Check for corrected files:
+            corrected_files = list(patient_folder.rglob("*corrected.nii.gz"))
 
-            corrected_files = [f for f in ct_files if "CORRECTED.NII.GZ" in f.name.upper()]
-            input_file = corrected_files[0] if corrected_files else ct_files[0]
-            print(f"Using {input_file.name} for CT")
+            if corrected_files:
+                input_file = corrected_files[0]
+                print(f"Using corrected NIfTI: {input_file}")
 
+            else:
+                # If there is no corrected one: get CT folder
+                ct_dirs = [
+                    d for d in patient_folder.iterdir()
+                    if d.is_dir() and "CT" in d.name.upper()
+                ]
+                if not ct_dirs:
+                    print(f"⚠️ No CT folder found for {patient_folder.name}")
+                    continue
+
+                input_file = ct_dirs[0]
+                print(f"Using CT folder: {input_file}")
+
+            #Make the segmentation output folder:
             output_dir = patient_folder / "CT_segmentation"
             os.makedirs(output_dir, exist_ok=True)
 
@@ -42,6 +56,17 @@ def TotalSegmentator_dicom_CT(data_root, segmentate_organs_ct, segmentate_body_c
                     input_file,
                     output_dir,
                     fast=fast,
+                )
+
+            # -------------------------
+            # Lung segmentation
+            # -------------------------
+            if segmentate_lung_ct:
+                totalsegmentator(
+                    input_file,
+                    output_dir,
+                    fast=fast,
+                    task="lung_nodules"
                 )
 
             # -------------------------
@@ -88,6 +113,7 @@ def align_and_segment_images(
     data_dir,
     segmentate_organs_ct=False,
     segmentate_body_ct=False,
+    segmentate_lung_ct=False,
     fast=True
 ):
     """
@@ -108,7 +134,6 @@ def align_and_segment_images(
     for patient in patients:
 
         patient_path = data_dir / patient
-
         if not patient_path.is_dir():
             continue
         if "segmentation" in patient.lower():
@@ -146,10 +171,9 @@ def align_and_segment_images(
 
     failed_patients = []
 
-    if segmentate_organs_ct or segmentate_body_ct:
+    if segmentate_organs_ct or segmentate_body_ct or segmentate_lung_ct:
         print("Segmentating: CT")
 
-        import dicom2nifti
         import dicom2nifti.settings as settings
         settings.disable_validate_slice_increment()
 
@@ -158,6 +182,7 @@ def align_and_segment_images(
                 data_dir,
                 segmentate_organs_ct,
                 segmentate_body_ct,
+                segmentate_lung_ct,
                 fast=fast
             )
         except Exception as e:
@@ -172,6 +197,7 @@ def align_and_segment_images(
                         patient_folder,
                         segmentate_organs_ct,
                         segmentate_body_ct,
+                        segmentate_lung_ct,
                         fast=fast
                     )
                 except Exception as patient_error:
@@ -193,3 +219,4 @@ def align_and_segment_images(
         print(f"\nFailure log saved to: {failure_file}")
 
     print("Alignment + Segmentation completed.")
+
