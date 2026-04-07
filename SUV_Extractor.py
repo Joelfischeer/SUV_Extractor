@@ -7,7 +7,7 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../../../Data/Magenband/Images/vor_op")
+    imgdir = Path("../../../Data/Magenband/Images/nach_op")
     #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
     output_path = Path("../../../Data/Magenband")
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     from Analysis.Normalization_to_aorta import aorta_normalization
     from Image_loading.Image_Loader import erode_organ_masks
 
-    '''
+    
     all_results = []
 
     for patient in patients:
@@ -122,12 +122,17 @@ if __name__ == "__main__":
 
         # 2. Load Cropped organs:
         organs_of_interest_and_L1 = organs_of_interest + ['aorta'] + ['vertebrae_L1']
-        PET_organs_raw = PET_Organ_Cropper(
+        result = PET_Organ_Cropper(
             data_dir=imgdir,
             patient=patient,
             organs_of_interest=organs_of_interest_and_L1,  # Include aorta and vertebrae L1
             combination_logic=combination_logic
         )
+        # Extract organ data and patient metrics
+        PET_organs_raw = result["organs"]
+        height_m = result["patient_height_m"]
+        weight_kg = result["patient_weight_kg"]
+        bmi = result["patient_BMI"]
         
         # 3 Remvove pixels around each organ to remove contamination from bad segmentation:
         #PET_organs_raw = erode_organ_masks(
@@ -169,6 +174,9 @@ if __name__ == "__main__":
         )
         
         if patient_result:
+            patient_result['height_m'] = height_m
+            patient_result['weight_kg'] = weight_kg
+            patient_result['bmi'] = bmi
             all_results.append(patient_result)
 
 
@@ -176,7 +184,7 @@ if __name__ == "__main__":
     
     # Save results
     results_saver(all_results, output_path)
-    '''
+    
     combined_df = compare_manual_automatic(
     auto_results_csv= f"{output_path}_SUVs_nach_op.csv",
     manual_csv=f"{output_path}_SUVs_vor_op.csv",

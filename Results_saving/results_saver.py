@@ -6,6 +6,7 @@ def results_saver(results, output_path):
     Save results dictionary/list to CSV.
     Automatically creates output folders if they do not exist.
     Handles patient physical data (height, weight, BMI) columns.
+    Removes duplicate patient columns.
     """
 
     import os
@@ -27,35 +28,56 @@ def results_saver(results, output_path):
     # Handle patient physical data columns (forward-fill per patient)
     # --------------------------------------------------
     physical_cols = ['height_m', 'weight_kg', 'bmi']
+    patient_cols = ['patient_id', 'Patient']
+    
+    # Find the primary patient column (prefer 'patient_id')
+    patient_col = None
+    for col in patient_cols:
+        if col in df.columns:
+            patient_col = col
+            break
+    
     for col in physical_cols:
         if col in df.columns:
             # Forward-fill within each patient group
-            if 'patient_id' in df.columns:
-                df[col] = df.groupby('patient_id')[col].ffill().bfill()
-            elif 'Patient' in df.columns:
-                df[col] = df.groupby('Patient')[col].ffill().bfill()
+            if patient_col:
+                df[col] = df.groupby(patient_col)[col].ffill().bfill()
             print(f"✅ Processed {col} column")
 
     # --------------------------------------------------
-    # Sort alphabetically by patient (if column exists)
+    # Remove duplicate patient columns (keep only the primary one)
     # --------------------------------------------------
-    patient_col = next((col for col in ['patient_id', 'Patient'] if col in df.columns), None)
+    duplicate_patient_cols = [col for col in patient_cols if col in df.columns and col != patient_col]
+    if duplicate_patient_cols:
+        df = df.drop(columns=duplicate_patient_cols)
+        print(f"🗑️ Removed duplicate patient columns: {duplicate_patient_cols}")
+
+    # --------------------------------------------------
+    # Sort alphabetically by patient column
+    # --------------------------------------------------
     if patient_col:
         df = df.sort_values(patient_col)
 
     # --------------------------------------------------
-    # Reorder columns: patient info first, then physical data, then metrics
+    # Reorder columns: patient → physical data → metrics
     # --------------------------------------------------
     cols = list(df.columns)
+    remaining_cols = cols.copy()
+    
+    # Patient column first
+    new_order = []
     if patient_col:
-        cols.remove(patient_col)
-        cols = [patient_col] + cols
+        new_order.append(patient_col)
+        remaining_cols.remove(patient_col)
     
-    physical_cols_present = [col for col in physical_cols if col in cols]
+    # Physical columns next
+    physical_cols_present = [col for col in physical_cols if col in remaining_cols]
+    new_order.extend(physical_cols_present)
     for col in physical_cols_present:
-        cols.remove(col)
+        remaining_cols.remove(col)
     
-    new_order = ([patient_col] if patient_col else []) + physical_cols_present + cols
+    # Metrics last
+    new_order.extend(remaining_cols)
     df = df[new_order]
 
     # --------------------------------------------------
@@ -69,6 +91,8 @@ def results_saver(results, output_path):
     print(f"📈 Columns: {list(df.columns)}")
     
     # Summary stats for physical data
+    if patient_col:
+        print(f"\n📋 Per-patient summary (grouped by '{patient_col}'):")
     for col in physical_cols:
         if col in df.columns:
             valid_values = df[col].dropna()
