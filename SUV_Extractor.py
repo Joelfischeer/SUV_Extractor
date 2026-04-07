@@ -49,8 +49,9 @@ if __name__ == "__main__":
             'Thyroids cB': 'thyroids',
             'Adr Gl cB': 'adrenal_glands'}
     
-    rename = {'duodenum': 'small_intestine',
-              'thyroid_gland': 'thyroids'}
+    rename = {#'duodenum': 'small_intestine',
+              #'thyroid_gland': 'thyroids'
+              }
 
     combination_logic = {
     'lungs': ['lung_lower_lobe_left', 'lung_middle_lobe_left', 'lung_upper_lobe_left','lung_lower_lobe_right', 'lung_middle_lobe_right', 'lung_upper_lobe_right'],

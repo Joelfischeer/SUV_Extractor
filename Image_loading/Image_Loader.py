@@ -59,6 +59,17 @@ def PET_Organ_Cropper(
         return None
 
     ref_ds = pydicom.dcmread(dicom_files[0], force=True)
+
+    # Extract patient physical attributes
+    weight_kg = getattr(ref_ds, "PatientWeight", None)
+    height_m = getattr(ref_ds, "PatientSize", None)
+
+    if weight_kg is None or height_m is None:
+        print("⚠️ Missing height or weight info.")
+        bmi = None
+    else:
+        bmi = weight_kg / (height_m ** 2)
+
     weight_g = ref_ds.PatientWeight * 1000
     rad_info = ref_ds.RadiopharmaceuticalInformationSequence[0]
     injected_dose = rad_info.RadionuclideTotalDose
@@ -234,7 +245,12 @@ def PET_Organ_Cropper(
     del pet_sitk
     gc.collect()
 
-    return cropped_organs
+    return {
+        "organs": cropped_organs,
+        "patient_height_m": height_m,
+        "patient_weight_kg": weight_kg,
+        "patient_BMI": bmi
+    }
 
 
 from scipy.ndimage import binary_erosion
