@@ -7,15 +7,16 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../../../Data/Magenband/Images")
+    imgdir = Path("../../../Data/Magenband/Images/vor_op")
     #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
     output_path = Path("../../../Data/Magenband")
 
     #Do we need to segmentate the images?
-    SEGMENTATE_ORGANS = True
-    SEGMENTATE_BODY = True
-    SEGMENTATE_LUNG = True
+    SEGMENTATE_ORGANS = False
+    SEGMENTATE_BODY = False
+    SEGMENTATE_LUNG = False
+    NORMALIZE = False
 
 
     organs_of_interest = [
@@ -107,7 +108,7 @@ if __name__ == "__main__":
     from Analysis.Normalization_to_aorta import aorta_normalization
     from Image_loading.Image_Loader import erode_organ_masks
 
-    
+    '''
     all_results = []
 
     for patient in patients:
@@ -149,9 +150,15 @@ if __name__ == "__main__":
         print(aorta_reference)
 
         # 6. Apply normalization to ALL organ crops at once
-        PET_organs_normalized = {}
-        for organ, organ_array in PET_organs_raw.items():
-            PET_organs_normalized[organ] = organ_array / aorta_reference
+        if NORMALIZE:
+            PET_organs_normalized = {}
+            for organ, organ_array in PET_organs_raw.items():
+                PET_organs_normalized[organ] = organ_array / aorta_reference
+        else:
+            PET_organs_normalized = {}
+            for organ, organ_array in PET_organs_raw.items():
+                PET_organs_normalized[organ] = organ_array
+
         
         # 7. Compute final stats (already normalized)
         patient_result = compute_suv(
@@ -168,10 +175,10 @@ if __name__ == "__main__":
     
     # Save results
     results_saver(all_results, output_path)
-    
+    '''
     combined_df = compare_manual_automatic(
-    auto_results_csv= f"{output_path}_SUVs.csv",
-    manual_csv="../data/Quadra_test_retest.csv",
+    auto_results_csv= f"{output_path}_SUVs_nach_op.csv",
+    manual_csv=f"{output_path}_SUVs_vor_op.csv",
     translator=translator,
     rename = rename,
     output_path=output_path

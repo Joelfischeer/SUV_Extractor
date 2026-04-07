@@ -49,16 +49,15 @@ def PET_Organ_Cropper(
     # ✅ enforce consistent orientation
     pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
 
-    # --------------------------------------------------
-    # Convert PET → SUV (volume wise)
-    # --------------------------------------------------
 
+    # --------------------------------------------------
+    # Load reference DICOM for metadata
+    # --------------------------------------------------
     dicom_files = list(Path(pet_folder).glob("*.dcm"))
     if len(dicom_files) == 0:
         print("⚠️ No PET DICOMs found.")
         return None
 
-    # ✅ VOLUME-WISE: Use REFERENCE slice for ALL parameters
     ref_ds = pydicom.dcmread(dicom_files[0], force=True)
     weight_g = ref_ds.PatientWeight * 1000
     rad_info = ref_ds.RadiopharmaceuticalInformationSequence[0]
@@ -79,18 +78,27 @@ def PET_Organ_Cropper(
     lambda_decay = math.log(2) / half_life
     decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
 
+    # --------------------------------------------------
+    # Convert PET → SUV (volume wise)
+    # --------------------------------------------------
+
     # Get raw PET voxel data (SimpleITK handles orientation)
     pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
 
-    # ✅ VOLUME-WISE: Single rescale for ENTIRE volume (use reference slice)
-    ref_slope = float(ref_ds.RescaleSlope) if 'RescaleSlope' in ref_ds else 1.0
-    ref_intercept = float(ref_ds.RescaleIntercept) if 'RescaleIntercept' in ref_ds else 0.0
-    
-    # Apply uniform rescale to all voxels
-    pet_concentration = pet_raw * ref_slope + ref_intercept
+    units_tag = (0x0054, 0x1001)
+    units = str(ref_ds[units_tag].value) if units_tag in ref_ds else "Unknown"
+    print(f"PET Units: {units}")
 
-    # ✅ Final SUV: uniform scaling across entire 3D volume
-    pet_np = pet_concentration * weight_g / decay_corrected_dose
+    if "BQML" in units.upper():
+        activity_conc = pet_raw  # SKIP rescale - already Bq/ml!
+        suv_factor = weight_g / decay_corrected_dose
+        pet_np = activity_conc * suv_factor
+    else:
+        ref_slope = float(ref_ds.RescaleSlope) if 'RescaleSlope' in ref_ds else 1.0
+        ref_intercept = float(ref_ds.RescaleIntercept) if 'RescaleIntercept' in ref_ds else 0.0
+        activity_conc = pet_raw * ref_slope + ref_intercept
+        pet_np = activity_conc * weight_g / decay_corrected_dose
+
 
     # --------------------------------------------------
     # Load segmentations

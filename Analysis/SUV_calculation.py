@@ -22,7 +22,7 @@ def compute_suv(
             result[organ] = np.nan
             continue
             
-        organ_non_zero = organ_dict[organ][organ_dict[organ] > 0]
+        organ_non_zero = organ_dict[organ][organ_dict[organ] > 0] #Ignore noise under 0.5
         if len(organ_non_zero) == 0:
             result[organ] = np.nan
             continue
