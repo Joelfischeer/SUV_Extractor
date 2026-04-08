@@ -17,6 +17,7 @@ if __name__ == "__main__":
     SEGMENTATE_BODY = False
     SEGMENTATE_LUNG = False
     NORMALIZE = False
+    ERODE = False
 
 
     organs_of_interest = [
@@ -135,10 +136,11 @@ if __name__ == "__main__":
         bmi = result["patient_BMI"]
         
         # 3 Remvove pixels around each organ to remove contamination from bad segmentation:
-        #PET_organs_raw = erode_organ_masks(
-        #    PET_organs_raw, 
-        #    erosion_config=erosion_config 
-        #)
+        if ERODE:
+            PET_organs_raw = erode_organ_masks(
+                PET_organs_raw, 
+                erosion_config=erosion_config 
+            )
 
         # 4. Apply renaming:
         PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
