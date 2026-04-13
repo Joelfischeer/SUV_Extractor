@@ -1,12 +1,13 @@
-import numpy as np
-
 def aorta_normalization(PET_organs_raw):
+
     """
     Compute mean SUV in aorta restricted to L1 vertebrae z-range,
     only using voxels where aorta > 0 (excluding background).
     Falls back to full aorta if needed.
     Assumes PET_organs_raw contains cropped organ 'PET' images with the SUV array.
     """
+
+    import numpy as np
 
     normalize_value = None
 
