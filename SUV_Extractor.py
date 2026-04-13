@@ -7,10 +7,10 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories:
-    imgdir = Path("../../../Data/Magenband/Images/nach_op")
+    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/BAT_before_cooling")
     #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
 
-    output_path = Path("../../../Data/Magenband")
+    output_path = Path("../Results/BAT")
 
     #Do we need to segmentate the images?
     SEGMENTATE_ORGANS = False
@@ -33,7 +33,9 @@ if __name__ == "__main__":
         'thyroid_gland',
         'brain',
         'muscle',
-        'thyroids'
+        'thyroids',
+        'heart',
+        'superior_vena_cava'
     ]
 
     translator = {'brain cB': 'brain', 
@@ -76,6 +78,8 @@ if __name__ == "__main__":
             'thyroids': 1,
             'brain': 1,
             'muscle': 1,
+            'heart':1,
+            'superior_vena_cava':1,
             'DEFAULT': 1
         }
     
