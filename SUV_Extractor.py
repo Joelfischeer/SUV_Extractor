@@ -6,11 +6,11 @@ import numpy as np
 
 if __name__ == "__main__":
 
-    #Data Directories:
-    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/BAT_before_cooling")
-    #imgdir = Path("../Images/Healthy_Test_Retest_First_Scan")    
+    #Data Directories, Assumes a folder where for each patient there is a folder with a DICOM series with CT images and one with PET images:
+    imgdir = Path("../Images")
 
-    output_path = Path("../Results/BAT")
+    #Output Path:
+    output_path = Path("../Results")
 
     #Do we need to segmentate the images?
     SEGMENTATE_ORGANS = False
@@ -110,7 +110,6 @@ if __name__ == "__main__":
     from Image_loading.Image_Loader import PET_Organ_Cropper
     from Analysis.SUV_calculation import compute_suv
     from Results_saving.results_saver import results_saver
-    from Analysis.Comparison_to_manual import compare_manual_automatic
     from Analysis.Normalization_to_aorta import aorta_normalization
     from Image_loading.Image_Loader import erode_organ_masks
 
@@ -148,31 +147,32 @@ if __name__ == "__main__":
 
         # 4. Apply renaming:
         PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
-
-        if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
-            print(f"⚠️ No valid aorta for {patient}")
-            continue
-
-        if "vertebrae_L1" not in PET_organs_raw or np.sum(PET_organs_raw["vertebrae_L1"] > 0) == 0:
-            print(f"⚠️ No valid vertebrae_L1 for {patient}")
-            continue
         
-        # 5. Compute aorta reference
-        aorta_reference = aorta_normalization(PET_organs_raw)
-        print(aorta_reference)
-
-        # 6. Apply normalization to ALL organ crops at once
+        # 5. Normalize to aorta blood pool:
         if NORMALIZE:
+
+            if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
+                print(f"⚠️ No valid aorta for {patient}")
+                continue
+
+            if "vertebrae_L1" not in PET_organs_raw or np.sum(PET_organs_raw["vertebrae_L1"] > 0) == 0:
+                print(f"⚠️ No valid vertebrae_L1 for {patient}")
+                continue
+
+            aorta_reference = aorta_normalization(PET_organs_raw)
+
+            # Apply normalization to ALL organ crops at once
             PET_organs_normalized = {}
             for organ, organ_array in PET_organs_raw.items():
                 PET_organs_normalized[organ] = organ_array / aorta_reference
+
         else:
             PET_organs_normalized = {}
             for organ, organ_array in PET_organs_raw.items():
                 PET_organs_normalized[organ] = organ_array
 
         
-        # 7. Compute final stats (already normalized)
+        # 6. Compute final stats (already normalized)
         patient_result = compute_suv(
             PET_organs_normalized,
             organs_of_interest=organs_of_interest + ['aorta'],
@@ -185,25 +185,6 @@ if __name__ == "__main__":
             patient_result['bmi'] = bmi
             all_results.append(patient_result)
 
-
-               
-    
     # Save results
     results_saver(all_results, output_path)
-    
-    combined_df = compare_manual_automatic(
-    auto_results_csv= f"{output_path}_SUVs_nach_op.csv",
-    manual_csv=f"{output_path}_SUVs_vor_op.csv",
-    translator=translator,
-    rename = rename,
-    output_path=output_path
-)
-        
-
-
-        
-        
-
-        
-
         
