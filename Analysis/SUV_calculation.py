@@ -1,11 +1,3 @@
-import os
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import SimpleITK as sitk
-import pydicom
-import math
-
 
 def compute_suv(
     organ_dict,
@@ -13,6 +5,9 @@ def compute_suv(
     patient_id=None
 ):
     """Compute mean SUV per organ from PET image."""
+    
+    import numpy as np
+
     
     result = {"Patient": patient_id}
     
