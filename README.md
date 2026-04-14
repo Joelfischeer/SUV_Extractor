@@ -35,7 +35,7 @@ D_{\mathrm{corr}} = D_0 \, e^{-(\ln 2 / T_{1/2})\Delta t}
 This equation can then be plugged into the SUV equation. Now we just need to consider two possible cases depending on the PET data.
 
 ### BQML Case:
-If the original PET image is already provided as an Bq/ML map the units do not have to be converted.
+If the original PET image is already provided as an Bq/mL map the units do not have to be converted.
 Here the intensity map is already the Activity Concentration.
 ```math
 C(x,y,z)=I(x,y,z)
@@ -47,7 +47,7 @@ So we end up with the following final formula:
 ```
 
 ### Non BQML Case:
-If the orignal PET image is not provided as a Bq/ML map we need to convert it. This is done using a raw PET conversion with 
+If the orignal PET image is not provided as a Bq/mL map we need to convert it. This is done using a raw PET conversion with 
 
 ```math
 C(x,y,z)=I(x,y,z)\cdot s+b
