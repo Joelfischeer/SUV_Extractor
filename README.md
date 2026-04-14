@@ -57,7 +57,7 @@ where
 - $I(x,y,z)$ is the raw voxel intensity value
 - $s$ is the RescaleSlope
 - $b$ is the RescaleIntercept
-- 
+  
 Using this formula we end up with the following final formula:
 
 ```math
