@@ -28,9 +28,6 @@ def PET_Organ_Cropper(
         print("⚠️ Patient folder not found.")
         return None
 
-    # --------------------------------------------------
-    # Load PET folder + geometry 
-    # --------------------------------------------------
     pet_folder = next(
         (os.path.join(patient_path, f) for f in os.listdir(patient_path)
          if 'PET' in f.upper() or 'FDG' in f.upper() or '5-MIN' in f.upper()),
@@ -46,13 +43,10 @@ def PET_Organ_Cropper(
     reader.SetFileNames(dicom_names)
     pet_sitk = reader.Execute()
 
-    # ✅ enforce consistent orientation
+    # Enforce consistent orientation
     pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
 
 
-    # --------------------------------------------------
-    # Load reference DICOM for metadata
-    # --------------------------------------------------
     dicom_files = list(Path(pet_folder).glob("*.dcm"))
     if len(dicom_files) == 0:
         print("⚠️ No PET DICOMs found.")
@@ -78,7 +72,7 @@ def PET_Organ_Cropper(
     def dicom_time_to_seconds(t):
         return int(t[:2])*3600 + int(t[2:4])*60 + float(t[4:])
 
-    # ✅ Single delta_t for entire volume (series-level decay correction)
+    # Single delta_t for entire volume 
     delta_t = (
         dicom_time_to_seconds(ref_ds.AcquisitionTime)
         - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
@@ -88,10 +82,6 @@ def PET_Organ_Cropper(
 
     lambda_decay = math.log(2) / half_life
     decay_corrected_dose = injected_dose * math.exp(-lambda_decay * delta_t)
-
-    # --------------------------------------------------
-    # Convert PET → SUV (volume wise)
-    # --------------------------------------------------
 
     # Get raw PET voxel data (SimpleITK handles orientation)
     pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
@@ -110,10 +100,7 @@ def PET_Organ_Cropper(
         activity_conc = pet_raw * ref_slope + ref_intercept
         pet_np = activity_conc * weight_g / decay_corrected_dose
 
-
-    # --------------------------------------------------
-    # Load segmentations
-    # --------------------------------------------------
+    #Get the segmentations
     segmentation_folder = os.path.join(patient_path, 'CT_segmentation')
 
     if not os.path.exists(segmentation_folder):
@@ -126,14 +113,12 @@ def PET_Organ_Cropper(
         seg_path = os.path.join(segmentation_folder, seg_file)
         seg_img = sitk.ReadImage(seg_path)
 
-        # ✅ enforce same orientation before resampling
+        # Enforce same orientation before resampling
         seg_img = sitk.DICOMOrient(seg_img, "LPS")
 
         available_segs[seg_file] = seg_img
 
-    # --------------------------------------------------
     # Apply combination logic
-    # --------------------------------------------------
     if combination_logic is not None:
         for combined_name, components in combination_logic.items():
             combined_mask = None
@@ -151,15 +136,12 @@ def PET_Organ_Cropper(
             if combined_mask is not None:
                 available_segs[combined_name] = combined_mask
 
-    # --------------------------------------------------
+
     # Crop organs
-    # --------------------------------------------------
     organs_to_process = list(organs_of_interest) + ['aorta']
     cropped_organs = {}
 
-    # --------------------------------------------------
     # Get L1 range (for aorta restriction)
-    # --------------------------------------------------
     l1_key = next((k for k in available_segs if "vertebrae_l1" in k.lower()), None)
     l1_z_range = None
 
@@ -184,9 +166,7 @@ def PET_Organ_Cropper(
         del aligned_l1, l1_np
         gc.collect()
 
-    # --------------------------------------------------
     # Process each organ
-    # --------------------------------------------------
     for organ in organs_to_process:
 
         matched_key = next(
@@ -200,7 +180,7 @@ def PET_Organ_Cropper(
 
         seg_img = available_segs[matched_key]
 
-        # ✅ ALWAYS align segmentation to PET
+        # Align segmentation to PET
         aligned_seg = sitk.Resample(
             seg_img,
             pet_sitk,
@@ -212,7 +192,7 @@ def PET_Organ_Cropper(
 
         seg_np = sitk.GetArrayFromImage(aligned_seg)
 
-        # SAFETY CHECK
+        # Check for mismatch
         if seg_np.shape != pet_np.shape:
             print(f"❌ Shape mismatch: PET {pet_np.shape} vs SEG {seg_np.shape}")
             continue
@@ -231,7 +211,7 @@ def PET_Organ_Cropper(
         min_z, min_y, min_x = non_zero.min(axis=0)
         max_z, max_y, max_x = non_zero.max(axis=0)
 
-        # Apply mask BEFORE cropping
+        # Apply mask before cropping
         masked_pet = np.zeros_like(pet_np)
         masked_pet[seg_np > 0] = pet_np[seg_np > 0]
 
@@ -273,7 +253,7 @@ def erode_organ_masks(organ_dict, erosion_config=None):
     for organ, pet_crop in organ_dict.items():
         voxels_to_erode = erosion_config.get(organ, erosion_config['DEFAULT'])
         
-        # ✅ FIXED: Create mask from original 3D array
+        # Create mask from original 3D array
         binary_mask = pet_crop > 0
         
         orig_voxels = np.sum(binary_mask)
@@ -282,16 +262,15 @@ def erode_organ_masks(organ_dict, erosion_config=None):
             eroded_organs[organ] = pet_crop
             continue
         
-        # Erode the BINARY mask (stays 3D)
+        # Erode the binary mask
         eroded_binary = binary_erosion(
             binary_mask, 
             structure=np.ones((3,3,3)),
             iterations=voxels_to_erode
         )
         
-        # ✅ FIXED: Use eroded_binary to index original 3D pet_crop directly
         eroded_crop = np.zeros_like(pet_crop)
-        eroded_crop[eroded_binary] = pet_crop[eroded_binary]  # ← Direct 3D→3D indexing
+        eroded_crop[eroded_binary] = pet_crop[eroded_binary]  
         
         new_voxels = np.sum(eroded_binary)
         reduction_pct = 100 * (1 - new_voxels / orig_voxels)
