@@ -40,7 +40,7 @@ Here the intensity map is already the Activity Concentration.
 ```math
 C(x,y,z)=I(x,y,z)
 ```
-So we end up with the following final formula:
+So the following formula is used:
 
 ```math
 \mathrm{SUV}_{bw}(x,y,z)=\frac{I(x,y,z)\cdot W}{D_0 \, e^{-(\ln 2 / T_{1/2})\Delta t}}
