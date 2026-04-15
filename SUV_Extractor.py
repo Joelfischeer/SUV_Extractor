@@ -123,7 +123,6 @@ if __name__ == "__main__":
             if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
         )
         
-
         # 2. Load Cropped organs:
         organs_of_interest_and_L1 = organs_of_interest + ['aorta'] + ['vertebrae_L1']
         result = PET_Organ_Cropper(
@@ -138,7 +137,7 @@ if __name__ == "__main__":
         weight_kg = result["patient_weight_kg"]
         bmi = result["patient_BMI"]
         
-        # 3 Remvove pixels around each organ to remove contamination from bad segmentation:
+        # 3 Remove pixels around each organ to remove contamination from bad segmentation:
         if ERODE:
             PET_organs_raw = erode_organ_masks(
                 PET_organs_raw, 

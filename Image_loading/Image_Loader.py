@@ -54,9 +54,10 @@ def PET_Organ_Cropper(
 
     ref_ds = pydicom.dcmread(dicom_files[0], force=True)
 
-    # Extract patient physical attributes
+    # Extract patient attributes
     weight_kg = getattr(ref_ds, "PatientWeight", None)
     height_m = getattr(ref_ds, "PatientSize", None)
+    time_scan = getattr(ref_ds, "SeriesTime", None)
 
     if weight_kg is None or height_m is None:
         print("⚠️ Missing height or weight info.")
@@ -229,7 +230,8 @@ def PET_Organ_Cropper(
         "organs": cropped_organs,
         "patient_height_m": height_m,
         "patient_weight_kg": weight_kg,
-        "patient_BMI": bmi
+        "patient_BMI": bmi,
+        "patient_time_of_scan": time_scan
     }
 
 
