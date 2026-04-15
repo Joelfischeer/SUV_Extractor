@@ -136,6 +136,7 @@ if __name__ == "__main__":
         height_m = result["patient_height_m"]
         weight_kg = result["patient_weight_kg"]
         bmi = result["patient_BMI"]
+        time_of_scan = result["patient_time_of_scan"]
         
         # 3 Remove pixels around each organ to remove contamination from bad segmentation:
         if ERODE:
@@ -182,6 +183,7 @@ if __name__ == "__main__":
             patient_result['height_m'] = height_m
             patient_result['weight_kg'] = weight_kg
             patient_result['bmi'] = bmi
+            patient_result['time_of_scan'] = time_of_scan
             all_results.append(patient_result)
 
     # Save results
