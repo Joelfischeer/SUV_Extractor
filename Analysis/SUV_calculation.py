@@ -29,7 +29,15 @@ def compute_suv(
         
         #Calculate the mean and round to 3 digits:
         mean_suv = np.mean(organ_non_zero)
-        result[organ] = round(mean_suv, 3)
+        result[f'{organ}_mean_automatic'] = round(mean_suv, 3)
+
+        #Calculate the max and round to 3 digits:
+        max_suv = max(organ_non_zero)
+        result[f'{organ}_max_automatic'] = round(max_suv, 3)
+
+        #Calculate the min and round to 3 digits:
+        min_suv = min(organ_non_zero)
+        result[f'{organ}_min_automatic'] = round(min_suv, 3)
     
     return result
 

@@ -7,7 +7,7 @@ import numpy as np
 if __name__ == "__main__":
 
     #Data Directories, Assumes a folder where for each patient there is a folder with a DICOM series with CT images and one with PET images:
-    imgdir = Path("../Images")
+    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
 
     #Output Path:
     output_path = Path("../Results")
@@ -146,7 +146,7 @@ if __name__ == "__main__":
             )
 
         # 4. Apply renaming:
-        PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
+        #PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
         
         # 5. Normalize to aorta blood pool:
         if NORMALIZE:
