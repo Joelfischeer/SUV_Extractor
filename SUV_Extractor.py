@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     SEGMENTATE_LUNG : bool
         If True, performs dedicated lung segmentation using the "lung_nodules" task in the
-        TotalSegmentator. Useful for Lung Cancer patients where this semgnetation task performs
+        TotalSegmentator. Useful for Lung Cancer patients where this segmetation task performs
         better. Also works for lung lesions.
 
     NORMALIZE : bool
