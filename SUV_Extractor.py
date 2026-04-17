@@ -1,21 +1,84 @@
 import os
 from pathlib import Path
 from tqdm import tqdm as tqdm
-import gc
 import numpy as np
 
 if __name__ == "__main__":
 
-    #Data Directories, Assumes a folder where for each patient there is a folder with a DICOM series with CT images and one with PET images:
-    imgdir = Path("../../Full_Body_Feature_Extraction/data/Images/Healthy_Test_Retest_First_Scan")
+    '''
+    Load PET and CT data for a given patient, segmentate organs on CT image, get
+    cropped PET volumes along with patient metadata, calculate SUV mean, max and min per organ.
+    
+    
+    Parameters
+    -----------
+    data_dir : pathlib.Path or str
+        Root directory containing all patient folders. Each patient folder is
+        expected to include PET and CT DICOM series. The PET and CT folders must
+        be named in the following way:
 
-    #Output Path:
+        - A PET folder name containing "PET", "FDG", or "5-MIN"
+        - A CT folder name containing "CT"
+
+    organs_of_interest : list of str
+        List of organ names to extract from the PET image. These should match
+        the available segmentation labels from TotalSegmentator: 
+        https://github.com/wasserth/TotalSegmentator?tab=readme-ov-file
+        
+    combination_logic : dict
+        Dictionary defining how multiple segmentation labels should be merged
+        into a single organ mask. Keys represent the target organ name, and
+        values are lists of label names that will be combined. 
+        If an organ is not listed here, it is assumed to correspond to a single
+        segmentation label.
+
+    Pipeline Configuration Flags
+    ----------------------------
+
+    SEGMENTATE_ORGANS : bool
+        If True, performs automatic segmentation of individual organs from CT images. 
+        Required for downstream organ-wise PET analysis. The Segmentations are saved in
+        the patient folder in new folder called "CT_Segmentation"
+        If False, assumes this organ segmentation folder already exists on disk.
+
+    SEGMENTATE_BODY : bool
+        If True, generates a whole-body mask from CT.
+
+    SEGMENTATE_LUNG : bool
+        If True, performs dedicated lung segmentation using the "lung_nodules" task in the
+        TotalSegmentator. Useful for Lung Cancer patients where this semgnetation task performs
+        better. Also works for lung lesions.
+
+    NORMALIZE : bool
+        If True, normalizes PET intensities using an aorta-based reference
+        (blood pool normalization). Each organ’s voxel values are divided by the
+        estimated aortic activity, enabling inter-patient comparability.
+
+        Requires valid segmentation of:
+            - aorta
+            - vertebrae_L1 (used for robust reference estimation)
+
+        If False, raw PET values (e.g., SUV) are used directly.
+
+    ERODE : bool
+        If True, applies morphological erosion to organ masks before extracting
+        PET values. This removes boundary voxels that may be affected by
+        partial volume effects or segmentation inaccuracies.
+
+        The erosion strength is controlled via `erosion_config` This indicates
+        the number of voxels to remove in all directions.
+
+        If False, full organ masks are used without modification.
+
+
+    '''
+
+    data_dir = Path("../../../Data/Clemens_Quadra_lungcancer/Images")
     output_path = Path("../Results")
 
-    #Do we need to segmentate the images?
-    SEGMENTATE_ORGANS = False
-    SEGMENTATE_BODY = False
-    SEGMENTATE_LUNG = False
+    SEGMENTATE_ORGANS = True
+    SEGMENTATE_BODY = True
+    SEGMENTATE_LUNG = True
     NORMALIZE = False
     ERODE = False
 
@@ -38,31 +101,12 @@ if __name__ == "__main__":
         'superior_vena_cava'
     ]
 
-    translator = {'brain cB': 'brain', 
-            'liver cB': 'liver', 
-            'pancreas cB': 'pancreas',
-            'spleen cB': 'spleen', 
-            'stomach cB': 'stomach', 
-            'bladder cB': 'bladder',
-            'heart cB': 'heart', 
-            'intest cB': 'small_intestine',
-            'glut cB': 'muscle',
-            'Kidneys cB': 
-            'kidneys', 'Lungs cB': 'lungs',
-            'Thyroids cB': 'thyroids',
-            'Adr Gl cB': 'adrenal_glands'}
-    
-    rename = {#'duodenum': 'small_intestine',
-              #'thyroid_gland': 'thyroids'
-              }
-
     combination_logic = {
     'lungs': ['lung_lower_lobe_left', 'lung_middle_lobe_left', 'lung_upper_lobe_left','lung_lower_lobe_right', 'lung_middle_lobe_right', 'lung_upper_lobe_right'],
     'adrenal_glands': ['adrenal_gland_left', 'adrenal_gland_right'],
     'kidneys' : ['kidney_left', 'kidney_right'],
     'muscle': ['gluteus_maximus_right', 'gluteus_maximus_left']
     }
-
 
     erosion_config = {
             'aorta': 1,
@@ -83,27 +127,21 @@ if __name__ == "__main__":
             'DEFAULT': 1
         }
     
-
-
-        #If segmentation is needed:
     if SEGMENTATE_ORGANS or SEGMENTATE_BODY or SEGMENTATE_LUNG:
         from Image_loading.Segmentator import align_and_segment_images
-
-        cohort_folders = [p for p in imgdir.iterdir() if p.is_dir()]
-        for cohort_folder in cohort_folders:
-            align_and_segment_images(
-                data_dir=cohort_folder,
-                segmentate_organs_ct=SEGMENTATE_ORGANS,
-                segmentate_body_ct=SEGMENTATE_BODY,
-                segmentate_lung_ct=SEGMENTATE_LUNG,
-                fast=False
-            )
+        align_and_segment_images(
+            data_dir=data_dir,
+            segmentate_organs_ct=SEGMENTATE_ORGANS,
+            segmentate_body_ct=SEGMENTATE_BODY,
+            segmentate_lung_ct=SEGMENTATE_LUNG,
+            fast=False
+        )
     
 
     #Get Patients in the folder:
     patients = sorted(
     entry.name
-    for entry in os.scandir(imgdir)
+    for entry in os.scandir(data_dir)
     if entry.is_dir()
     )
 
@@ -117,21 +155,22 @@ if __name__ == "__main__":
     all_results = []
 
     for patient in patients:
-        patient_dir = imgdir / patient
+        patient_dir = data_dir / patient
         pet_folder = next(
             p for p in patient_dir.iterdir()
             if p.is_dir() and ("LAST-5-MIN" in p.name.upper() or "PET" in p.name.upper())
         )
         
-        # 2. Load Cropped organs:
+        # 1. Load Cropped organs:
         organs_of_interest_and_L1 = organs_of_interest + ['aorta'] + ['vertebrae_L1']
         result = PET_Organ_Cropper(
-            data_dir=imgdir,
+            data_dir=data_dir,
             patient=patient,
-            organs_of_interest=organs_of_interest_and_L1,  # Include aorta and vertebrae L1
+            organs_of_interest=organs_of_interest_and_L1,
             combination_logic=combination_logic
         )
-        # Extract organ data and patient metrics
+
+        # 2. Extract organ data and patient metrics
         PET_organs_raw = result["organs"]
         height_m = result["patient_height_m"]
         weight_kg = result["patient_weight_kg"]
@@ -145,10 +184,7 @@ if __name__ == "__main__":
                 erosion_config=erosion_config 
             )
 
-        # 4. Apply renaming:
-        #PET_organs_raw = {rename.get(k, k): v for k, v in PET_organs_raw.items()}
-        
-        # 5. Normalize to aorta blood pool:
+        # 4. Normalize to aorta blood pool:
         if NORMALIZE:
 
             if "aorta" not in PET_organs_raw or np.sum(PET_organs_raw["aorta"] > 0) == 0:
@@ -161,7 +197,6 @@ if __name__ == "__main__":
 
             aorta_reference = aorta_normalization(PET_organs_raw)
 
-            # Apply normalization to ALL organ crops at once
             PET_organs_normalized = {}
             for organ, organ_array in PET_organs_raw.items():
                 PET_organs_normalized[organ] = organ_array / aorta_reference
@@ -172,7 +207,7 @@ if __name__ == "__main__":
                 PET_organs_normalized[organ] = organ_array
 
         
-        # 6. Compute final stats (already normalized)
+        # 5. Compute SUVs
         patient_result = compute_suv(
             PET_organs_normalized,
             organs_of_interest=organs_of_interest + ['aorta'],
@@ -186,6 +221,5 @@ if __name__ == "__main__":
             patient_result['time_of_scan'] = time_of_scan
             all_results.append(patient_result)
 
-    # Save results
     results_saver(all_results, output_path)
         

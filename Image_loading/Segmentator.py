@@ -24,7 +24,6 @@ def TotalSegmentator_dicom_CT(data_root,
         print(f"Processing {patient_folder}...")
     
         try:
-            #Check for corrected files:
             corrected_files = list(patient_folder.rglob("*corrected.nii.gz"))
 
             if corrected_files:
@@ -32,7 +31,6 @@ def TotalSegmentator_dicom_CT(data_root,
                 print(f"Using corrected NIfTI: {input_file}")
 
             else:
-                # If there is no corrected one: get CT folder
                 ct_dirs = [
                     d for d in patient_folder.iterdir()
                     if d.is_dir() and "CT" in d.name.upper()
@@ -44,13 +42,10 @@ def TotalSegmentator_dicom_CT(data_root,
                 input_file = ct_dirs[0]
                 print(f"Using CT folder: {input_file}")
 
-            #Make the segmentation output folder:
             output_dir = patient_folder / "CT_segmentation"
             os.makedirs(output_dir, exist_ok=True)
 
-            # -------------------------
             # Organ segmentation
-            # -------------------------
             if segmentate_organs_ct:
                 totalsegmentator(
                     input_file,
@@ -58,9 +53,7 @@ def TotalSegmentator_dicom_CT(data_root,
                     fast=fast,
                 )
 
-            # -------------------------
             # Lung segmentation
-            # -------------------------
             if segmentate_lung_ct:
                 totalsegmentator(
                     input_file,
@@ -69,9 +62,7 @@ def TotalSegmentator_dicom_CT(data_root,
                     task="lung_nodules"
                 )
 
-            # -------------------------
             # Body segmentation
-            # -------------------------
             if segmentate_body_ct:
                 totalsegmentator(
                     input_file,
@@ -89,9 +80,7 @@ def TotalSegmentator_dicom_CT(data_root,
                 f"{patient_folder.name} -> {str(e)}"
             )
 
-    # ===========================
     # Write failure log
-    # ===========================
     if failed_patients:
         failure_file = data_root / "totalsegmentator_failed_folders.txt"
         with open(failure_file, "w") as f:
@@ -123,12 +112,6 @@ def align_and_segment_images(
     """
 
     data_dir = Path(data_dir)
-
-    print("Image Alignment\n")
-
-    # ===========================
-    # A) ALIGN CT IMAGES
-    # ===========================
     patients = os.listdir(data_dir)
 
     for patient in patients:
@@ -152,22 +135,6 @@ def align_and_segment_images(
             ):
                 output_path = file_path.parent / f"{file_path.name}_corrected.nii.gz"
                 align_image_orientation(file_path, output_path)
-
-    # ===========================
-    # Dataset Summary
-    # ===========================
-    zip_files = sorted(data_dir.glob("*.zip"))
-    regular_dirs = [p for p in data_dir.iterdir() if p.is_dir()]
-
-    print(
-        f"Found {len(zip_files)} zipped DICOM files and "
-        f"{len(regular_dirs)} regular DICOM directories."
-    )
-
-    # ===========================
-    # B) SEGMENTATION (OPTIONAL)
-    # ===========================
-    print("Segmentation if required\n")
 
     failed_patients = []
 

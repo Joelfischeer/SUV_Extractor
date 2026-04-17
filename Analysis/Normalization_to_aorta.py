@@ -11,7 +11,6 @@ def aorta_normalization(PET_organs_raw):
 
     normalize_value = None
 
-    # We need both aorta mask and vertebrae_L2 mask
     has_aorta = "aorta" in PET_organs_raw
     has_L1 = "vertebrae_L1" in PET_organs_raw 
 
@@ -21,19 +20,15 @@ def aorta_normalization(PET_organs_raw):
         aorta_mask = PET_organs_raw["aorta"].copy()
         l1_mask = PET_organs_raw["vertebrae_L1"].copy()
 
-        # Compute z-range of L1 in PET space
         non_zero_L1 = np.argwhere(l1_mask > 0)
         if non_zero_L1.size > 0:
             min_z_l1, _, _ = non_zero_L1.min(axis=0)
             max_z_l1, _, _ = non_zero_L1.max(axis=0)
 
-            # Restrict aorta mask to L2 z-range
             aorta_L1_mask = aorta_mask.copy()
             aorta_L1_mask[:min_z_l1] = 0
             aorta_L1_mask[max_z_l1 + 1:] = 0
 
-            # Compute mean SUV in this restricted aortic region
-            # Mean where > 0 in restricted region
             valid_voxels = aorta_L1_mask > 0
             if np.any(valid_voxels):
                 normalize_value = float(aorta_L1_mask[valid_voxels].mean())
