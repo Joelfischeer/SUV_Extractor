@@ -9,6 +9,14 @@ Framework to calculate mean organ Standardized Uptake Values (SUVs) from PET/CT 
   - A PET folder with a name containing "PET", "FDG", or "5-MIN"
   - A CT folder with a name containing "CT"
 - Dictionary with organs of interest. Defined in the SUV_Extractor.py file.
+- A list of organs of interest
+
+### Pipeline Configuration Flags:
+- SEGMENTATE_ORGANS: If True, performs automatic segmentation of individual organs from CT images.
+- SEGMENTATE_BODY: If True, performs automatic segmentation of a whole-body mask from CT images.
+- SEGMENTATE_LUNG: If True, If True, performs dedicated lung segmentation using the "lung_nodules" task in the TotalSegmentator.
+- NORMALIZE: If True, normalizes PET intensities using an aorta-based reference (blood pool normalization).
+- ERODE: If True, applies morphological erosion to organ masks before extracting PET values.
 
 ### Output:
 - Table with a row per patient and the according mean SUV values for the organs of the patient.
