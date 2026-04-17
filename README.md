@@ -5,7 +5,9 @@ Framework to calculate mean organ Standardized Uptake Values (SUVs) from PET/CT 
 ## Getting Started:
 ### Input:
 - Path to a folder where for each individual patient a folder is present. These folder names will end up as IDs in the output table.
-- For each patient folder a folder of a DICOM series should be provided for both the PET and according CT image.
+- For each patient folder a folder of a DICOM series should be provided for both the PET and according CT image:
+  - A PET folder with a name containing "PET", "FDG", or "5-MIN"
+  - A CT folder with a name containing "CT"
 - Dictionary with organs of interest. Defined in the SUV_Extractor.py file.
 
 ### Output:
