@@ -73,14 +73,14 @@ if __name__ == "__main__":
 
     '''
 
-    data_dir = Path("../../../Data/Clemens_Quadra_lungcancer/Images")
+    data_dir = Path("../../Full_Body_Feature_Extraction/data/Images/Lung_cancer_leipzig")
     output_path = Path("../Results")
 
-    SEGMENTATE_ORGANS = True
-    SEGMENTATE_BODY = True
-    SEGMENTATE_LUNG = True
+    SEGMENTATE_ORGANS = False
+    SEGMENTATE_BODY = False
+    SEGMENTATE_LUNG = False
     NORMALIZE = False
-    ERODE = False
+    ERODE = True
 
 
     organs_of_interest = [
