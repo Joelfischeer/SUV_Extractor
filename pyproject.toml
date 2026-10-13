@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "moosez>=3.2.2",
     "numpy>=2.4.2",
     "pandas>=3.0.1",
     "path>=17.1.1",

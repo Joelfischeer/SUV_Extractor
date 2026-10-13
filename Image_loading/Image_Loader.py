@@ -1,28 +1,13 @@
-def _seg_name(key):
-    """'heart_atrium_left.nii.gz' -> 'heart_atrium_left' (lowercase, extension removed)."""
-    k = str(key).lower()
-    for ext in (".nii.gz", ".nii", ".mha", ".nrrd"):
-        if k.endswith(ext):
-            return k[: -len(ext)]
-    return k
-
-
-def _match_segmentation(keys, organ):
-    """
-    Exact file-name match first ('heart' -> 'heart.nii.gz'), substring match only
-    as a fallback (e.g. combined masks). A substring-only match can return
-    'heart_atrium_left.nii.gz' for 'heart', depending on the os.listdir order.
-    """
-    organ_l = organ.lower()
-    exact = next((k for k in keys if _seg_name(k) == organ_l), None)
-    if exact is not None:
-        return exact
-    return next((k for k in keys if organ_l in str(k).lower()), None)
-
-
+import gc
 import math
+import os
 
 import numpy as np
+
+from .segmentation_sources import (seg_name as _seg_name,                 # noqa: F401 (kept for imports elsewhere)
+                                   match_segmentation as _match_segmentation,  # noqa: F401
+                                   get_segmentation_source, CombinedMasks)
+from .folder_detection import find_pet_series
 
 
 # SUV conversion - identical to Single_Patient_Image_Loader, so both give the
@@ -100,6 +85,14 @@ def _pet_to_suv(pet_raw, ref_ds, headers):
     raise ValueError(f"Unsupported PET units: {units}")
 
 
+def _restrict_to_z(mask, z_range):
+    restricted = mask.copy()
+    zmin, zmax = z_range
+    restricted[:zmin] = 0
+    restricted[zmax + 1:] = 0
+    return restricted
+
+
 def PET_Organ_Cropper(
     data_dir,
     patient,
@@ -107,6 +100,9 @@ def PET_Organ_Cropper(
     combination_logic=None,
     norm_reference="inferior_vena_cava",
     reference_vertebra="vertebrae_L2",
+    segmentation_backend="totalsegmentator",
+    pet_name_hints=None,
+    moose_model_priority=None,
 ):
     """
     Load PET DICOM data for a patient, convert it to SUV units, align CT-based
@@ -116,18 +112,17 @@ def PET_Organ_Cropper(
     Parameters
     ----------
     data_dir : str or pathlib.Path
-        Root directory containing all patient subfolders. Each patient folder
-        must include:
-        - A PET DICOM series (folder name containing "PET", "FDG", or "5-MIN")
-        - A 'CT_segmentation' folder with organ segmentation masks
+        Root directory containing all patient subfolders.
 
     patient : str
         Patient identifier corresponding to a subfolder inside `data_dir`.
 
     organs_of_interest : list of str
-        Organ names to extract. Matched against the segmentation file names:
-        exact name first ('heart' -> 'heart.nii.gz'), substring match only as a
-        fallback. Missing or unmatched organs are skipped with a warning.
+        Organ names to extract (TotalSegmentator naming; MOOSE names are
+        mapped to it, e.g. 'vertebra_L2' -> 'vertebrae_L2'). Names must match
+        exactly (case-insensitive) or be defined in combination_logic; there
+        is no partial/substring matching. Missing organs are skipped with a
+        warning and give NaN in the results.
 
     combination_logic : dict, optional
         {"target_name": ["label1", "label2", ...]} - masks combined with OR.
@@ -142,6 +137,20 @@ def PET_Organ_Cropper(
         vertebra is missing or the restricted reference is empty, the whole
         reference mask is used and this is reported in `reference_method`.
 
+    segmentation_backend : 'totalsegmentator' or 'moose'
+        'totalsegmentator': <patient>/CT_segmentation/<region>.nii.gz
+        'moose': <patient>/moosez-*/segmentations/ (multi-label, newest run
+                 per model)
+
+    pet_name_hints : list of str, optional
+        Preferred PET series names (folder or SeriesDescription), in priority
+        order, e.g. ["PET_WB_CORRECTED"]. Only attenuation-corrected PT series
+        in BQML/CNTS are considered in any case (see folder_detection).
+
+    moose_model_priority : list of str, optional
+        If a region is in several MOOSE models (e.g. 'aorta' in organs and
+        cardiac), the model listed first wins.
+
     Returns
     -------
     dict or None
@@ -149,7 +158,7 @@ def PET_Organ_Cropper(
             Masked, tightly cropped PET volumes (SUV) per organ; the reference
             is included under its own name (e.g. 'inferior_vena_cava'),
             already restricted to the vertebra level.
-        - "reference_organ" : str           name of the reference, e.g. 'inferior_vena_cava'
+        - "reference_organ" : str           name of the reference
         - "reference_SUV_mean" : float|None mean SUV of the restricted reference,
                                             eroded in-plane by one voxel (unless that
                                             would empty it) - divide organ SUVs by
@@ -158,9 +167,12 @@ def PET_Organ_Cropper(
                                             anything without '_L2' used the whole mask
         - "reference_voxels" : int          voxels the reference value is based on
         - "patient_height_m", "patient_weight_kg", "patient_BMI",
-          "patient_time_of_scan" : as before
+          "patient_time_of_scan"
         - "suv_conversion" : dict           units, decay correction, method, SUV
                                             factor and uptake time (for auditing)
+        - "pet_series" : str                folder (relative to the patient) of the PET used
+        - "segmentation_backend" : str
+        - "organ_sources" : dict[str, str]  segmentation (and MOOSE model) per organ
 
         Returns None if required data (patient folder, PET data, or
         segmentations) are missing.
@@ -169,18 +181,9 @@ def PET_Organ_Cropper(
     -----
     - All organ outputs are in SUV units (not normalised).
     - Segmentation alignment uses nearest-neighbour interpolation.
-    - SUV conversion is identical to the main image loader (_pet_to_suv):
-      the SimpleITK array is already rescaled; BQML with the dose decayed to
-      the series start (DecayCorrection START) or not decayed (ADMIN); Philips
-      CNTS with the Philips SUV scale factor (private tag 7053,1000).
     """
-    import os
-    import numpy as np
     import SimpleITK as sitk
     import pydicom
-    import gc
-    import math
-    from pathlib import Path
     from scipy.ndimage import binary_erosion
 
     print(f"\nProcessing patient: {patient}")
@@ -190,26 +193,16 @@ def PET_Organ_Cropper(
         print("⚠️ Patient folder not found.")
         return None
 
-    pet_folder = next(
-        (os.path.join(patient_path, f) for f in os.listdir(patient_path)
-         if 'PET' in f.upper() or 'FDG' in f.upper() or '5-MIN' in f.upper()),
-        None
-    )
-
-    if pet_folder is None:
-        print("⚠️ No PET folder found.")
+    # ---------------- PET ----------------
+    pet = find_pet_series(patient_path, name_hints=pet_name_hints)
+    if pet is None:
         return None
+    dicom_names = pet["files"]
 
     reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(str(pet_folder))
     reader.SetFileNames(dicom_names)
     pet_sitk = reader.Execute()
-
     pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
-
-    if len(dicom_names) == 0:
-        print("⚠️ No PET DICOMs found.")
-        return None
 
     # Headers of the series' own (sorted) files - also finds DICOMs without
     # a .dcm extension.
@@ -231,66 +224,56 @@ def PET_Organ_Cropper(
     # The slope must not be applied again.
     pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
     pet_np, suv_info = _pet_to_suv(pet_raw, ref_ds, headers)
+    del pet_raw
     print(f"PET Units: {suv_info['units']} | {suv_info['method']} | "
           f"factor {suv_info['suv_factor']:.4e}")
 
-    segmentation_folder = os.path.join(patient_path, 'CT_segmentation')
-
-    if not os.path.exists(segmentation_folder):
-        print("⚠️ No segmentation folder found.")
+    # ---------------- Segmentations ----------------
+    source = get_segmentation_source(patient_path, segmentation_backend, pet_sitk,
+                                     moose_model_priority=moose_model_priority)
+    if source is None:
+        print("⚠️ No segmentation found.")
         return None
+    masks = CombinedMasks(source, combination_logic)
 
-    available_segs = {}
-
-    for seg_file in os.listdir(segmentation_folder):
-        seg_path = os.path.join(segmentation_folder, seg_file)
-        seg_img = sitk.ReadImage(seg_path)
-        seg_img = sitk.DICOMOrient(seg_img, "LPS")
-        available_segs[seg_file] = seg_img
-
-    # Apply combination logic
-    if combination_logic is not None:
-        for combined_name, components in combination_logic.items():
-            combined_mask = None
-            for comp in components:
-                matched_file = _match_segmentation(available_segs.keys(), comp)
-                if matched_file:
-                    part_mask = available_segs[matched_file]
-                    combined_mask = part_mask if combined_mask is None else sitk.Or(combined_mask, part_mask)
-            if combined_mask is not None:
-                available_segs[combined_name] = combined_mask
-
-    def _to_pet_space(seg_img):
-        aligned = sitk.Resample(seg_img, pet_sitk, sitk.Transform(),
-                                sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
-        return sitk.GetArrayFromImage(aligned)
+    def _describe(key):
+        if hasattr(source, "model_of") and key not in masks.combination_logic:
+            return f"{key} [{source.model_of(key)}]"
+        if key in masks.combination_logic:
+            parts = [match_ for match_ in (_match_segmentation(source.names(), c)
+                                           for c in masks.combination_logic[key]) if match_]
+            return f"{key} = " + " | ".join(parts)
+        return key
 
     # z-range of the reference vertebra in PET space
-    vert_key = _match_segmentation(available_segs.keys(), reference_vertebra)
     vert_z_range = None
+    vert_key = masks.resolve(reference_vertebra)
     if vert_key is not None:
-        vert_np = _to_pet_space(available_segs[vert_key])
-        non_zero = np.argwhere(vert_np > 0)
-        if non_zero.size > 0:
-            vert_z_range = (non_zero[:, 0].min(), non_zero[:, 0].max())
+        vert_np = masks.mask(vert_key)
+        if vert_np is not None:
+            non_zero = np.argwhere(vert_np > 0)
+            if non_zero.size > 0:
+                vert_z_range = (non_zero[:, 0].min(), non_zero[:, 0].max())
         del vert_np
-        gc.collect()
     else:
         print(f"⚠️ {reference_vertebra} not found - reference not restricted.")
 
-    # Crop organs (+ the reference)
+    # ---------------- Crop organs (+ the reference) ----------------
     organs_to_process = list(dict.fromkeys(list(organs_of_interest) + [norm_reference]))
-    cropped_organs = {}
+    cropped_organs, organ_sources = {}, {}
     reference_value, reference_method, reference_voxels = None, None, 0
     level = reference_vertebra.split("_")[-1].upper()          # 'L2'
 
     for organ in organs_to_process:
-        matched_key = _match_segmentation(available_segs.keys(), organ)
+        matched_key = masks.resolve(organ)
         if matched_key is None:
             print(f"⚠️ {organ} not found.")
             continue
 
-        seg_np = _to_pet_space(available_segs[matched_key])
+        seg_np = masks.mask(matched_key)
+        if seg_np is None:
+            print(f"⚠️ {organ} not found.")
+            continue
 
         if seg_np.shape != pet_np.shape:
             print(f"Shape mismatch: PET {pet_np.shape} vs SEG {seg_np.shape}")
@@ -300,10 +283,7 @@ def PET_Organ_Cropper(
         if organ == norm_reference:
             method = "full"
             if vert_z_range is not None:
-                zmin, zmax = vert_z_range
-                restricted = seg_np.copy()
-                restricted[:zmin] = 0
-                restricted[zmax + 1:] = 0
+                restricted = _restrict_to_z(seg_np, vert_z_range)
                 if np.any(restricted > 0):
                     seg_np, method = restricted, level
                 else:
@@ -329,15 +309,18 @@ def PET_Organ_Cropper(
         min_z, min_y, min_x = non_zero.min(axis=0)
         max_z, max_y, max_x = non_zero.max(axis=0)
 
-        # Apply mask before cropping
-        masked_pet = np.zeros_like(pet_np)
-        masked_pet[seg_np > 0] = pet_np[seg_np > 0]
+        # Apply mask before cropping (crop first, so no full-size copy is needed)
+        crop = (slice(min_z, max_z + 1), slice(min_y, max_y + 1), slice(min_x, max_x + 1))
+        seg_crop = seg_np[crop] > 0
+        cropped = np.zeros(seg_crop.shape, dtype=pet_np.dtype)
+        cropped[seg_crop] = pet_np[crop][seg_crop]
+        cropped_organs[organ] = cropped
+        organ_sources[organ] = _describe(matched_key)
 
-        cropped_organs[organ] = masked_pet[min_z:max_z + 1, min_y:max_y + 1, min_x:max_x + 1]
-
-        del seg_np, masked_pet
+        del seg_np, seg_crop
         gc.collect()
 
+    source.release()
     del pet_sitk
     gc.collect()
 
@@ -355,6 +338,9 @@ def PET_Organ_Cropper(
         "patient_BMI": bmi,
         "patient_time_of_scan": time_scan,
         "suv_conversion": suv_info,
+        "pet_series": os.path.relpath(pet["folder"], patient_path),
+        "segmentation_backend": source.backend,
+        "organ_sources": organ_sources,
     }
 
 
@@ -373,7 +359,6 @@ def erode_organ_masks(organ_dict, erosion_config=None, min_voxels=10):
         eroded_organs: dict with eroded masks applied to PET values
     """
     from scipy.ndimage import binary_erosion
-    import numpy as np
 
     erosion_config = {"DEFAULT": 1, **(erosion_config or {})}
     eroded_organs = {}

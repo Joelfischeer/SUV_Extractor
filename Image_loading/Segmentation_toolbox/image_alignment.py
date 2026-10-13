@@ -17,6 +17,7 @@ def align_image_orientation(file_path, output_path=None, tol=1e-4):
         Tolerance for floating-point comparison.
     """
 
+    file_path = str(file_path)
     if os.path.isdir(file_path):
         reader = sitk.ImageSeriesReader()
         dicom_names = reader.GetGDCMSeriesFileNames(file_path)
@@ -30,11 +31,11 @@ def align_image_orientation(file_path, output_path=None, tol=1e-4):
 
 
     if np.allclose(direction, standard, atol=tol):
-        is_standard = 1
         return img
 
     print("Detected non-standard direction matrix:")
-    
+    is_standard = 0   # was undefined for oblique matrices without swap/flip
+
 
     # --- Step 1: Detect permutation (axis swaps) ---
     best_perm = None
@@ -45,7 +46,6 @@ def align_image_orientation(file_path, output_path=None, tol=1e-4):
             break
 
     if best_perm is not None:
-        is_standard = 0
         print(f"Swapping axes according to {best_perm}")
         permuter = sitk.PermuteAxesImageFilter()
         permuter.SetOrder(best_perm)
@@ -56,7 +56,6 @@ def align_image_orientation(file_path, output_path=None, tol=1e-4):
     flip_axes = [bool(np.sign(direction[i, i]) < 0) for i in range(3)]
 
     if any(flip_axes):
-        is_standard = 0
         print(f"Flipping axes: {flip_axes}")
         flipper = sitk.FlipImageFilter()
         flipper.SetFlipAxes(flip_axes)
@@ -67,7 +66,7 @@ def align_image_orientation(file_path, output_path=None, tol=1e-4):
 
     # --- Step 4: Save corrected image ---
     if output_path and is_standard == 0:
-        sitk.WriteImage(img, output_path)
+        sitk.WriteImage(img, str(output_path))
         print(f"Corrected image saved to {output_path}")
 
     return 0
@@ -136,4 +135,3 @@ def align_image(image_to_align, reference_image, align_origin=True, align_spacin
     )
 
     return resampled
-

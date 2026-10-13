@@ -1,40 +1,33 @@
-
 def compute_suv(
     organ_dict,
     organs_of_interest,
     patient_id=None
 ):
     """
-    Compute mean SUV per organ from PET image. 
-    Ignore values outside the segmentations.
-    
+    Compute mean, max and min SUV per organ from the cropped PET volumes.
+    Ignore values outside the segmentations (voxels == 0).
+
+    Missing or empty organs get NaN in the same columns
+    ({organ}_mean/max/min_automatic), so every patient has the same columns.
     """
-    
+
     import numpy as np
 
     result = {"Patient": patient_id}
-    
+
     for organ in organs_of_interest:
+        keys = (f'{organ}_mean_automatic', f'{organ}_max_automatic', f'{organ}_min_automatic')
 
-        if organ not in organ_dict:
-            result[organ] = np.nan
+        organ_non_zero = (organ_dict[organ][organ_dict[organ] > 0]
+                          if organ in organ_dict else np.array([]))
+
+        if organ_non_zero.size == 0:
+            for k in keys:
+                result[k] = np.nan
             continue
-        
-        organ_non_zero = organ_dict[organ][organ_dict[organ] > 0]
 
-        if len(organ_non_zero) == 0:
-            result[organ] = np.nan
-            continue
-        
-        mean_suv = np.mean(organ_non_zero)
-        result[f'{organ}_mean_automatic'] = round(mean_suv, 3)
+        result[keys[0]] = round(float(np.mean(organ_non_zero)), 3)
+        result[keys[1]] = round(float(np.max(organ_non_zero)), 3)
+        result[keys[2]] = round(float(np.min(organ_non_zero)), 3)
 
-        max_suv = max(organ_non_zero)
-        result[f'{organ}_max_automatic'] = round(max_suv, 3)
-
-        min_suv = min(organ_non_zero)
-        result[f'{organ}_min_automatic'] = round(min_suv, 3)
-    
     return result
-
-
