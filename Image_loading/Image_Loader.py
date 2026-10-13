@@ -20,6 +20,86 @@ def _match_segmentation(keys, organ):
     return next((k for k in keys if organ_l in str(k).lower()), None)
 
 
+import math
+
+import numpy as np
+
+
+# SUV conversion - identical to Single_Patient_Image_Loader, so both give the
+# same SUVs for the same patient.
+def _dicom_time_to_seconds(t) -> float:
+    """'101530.123' / '1015' -> seconds since midnight."""
+    t = str(t).strip()
+    hh = int(t[0:2]); mm = int(t[2:4]) if len(t) >= 4 else 0
+    ss = float(t[4:]) if len(t) > 4 else 0.0
+    return hh * 3600 + mm * 60 + ss
+
+
+def _series_start_seconds(ref_ds, headers):
+    """
+    Start of the PET series in seconds since midnight: the SeriesTime, unless
+    a slice was acquired earlier (then the earliest AcquisitionTime). A single
+    slice's AcquisitionTime can be the time of a later bed position.
+    """
+    acq = [_dicom_time_to_seconds(h.AcquisitionTime) for h in headers
+           if h.get("AcquisitionTime")]
+    series = (_dicom_time_to_seconds(ref_ds.SeriesTime) if ref_ds.get("SeriesTime") else None)
+    if series is not None and (not acq or series <= min(acq)):
+        return series, "SeriesTime"
+    if acq:
+        return min(acq), "earliest AcquisitionTime"
+    return series, "SeriesTime"
+
+
+def _pet_to_suv(pet_raw, ref_ds, headers):
+    """
+    Convert an ALREADY RESCALED PET array to SUVbw.
+
+      BQML  SUV = Bq/ml * weight [g] / dose at the decay-correction reference
+              DecayCorrection 'ADMIN': images already corrected to the
+                  injection time -> injected dose, no decay
+              DecayCorrection 'START' (default) / other: dose decayed from
+                  injection to the series start
+      CNTS  Philips: SUV = rescaled value * Philips SUV scale factor (7053,1000)
+
+    Returns (suv_array, info dict for auditing).
+    """
+    units = str(ref_ds.get("Units", "Unknown")).upper()
+    info = {"units": units, "decay_correction": str(ref_ds.get("DecayCorrection", "")).upper()}
+
+    if units == "BQML":
+        weight_g = float(ref_ds.PatientWeight) * 1000
+        rad_info = ref_ds.RadiopharmaceuticalInformationSequence[0]
+        injected_dose = float(rad_info.RadionuclideTotalDose)
+        half_life = float(rad_info.RadionuclideHalfLife)
+        if info["decay_correction"] == "ADMIN":
+            dose_at_ref, delta_t, ref_label = injected_dose, 0.0, "ADMIN (no decay)"
+        else:
+            start_s, ref_label = _series_start_seconds(ref_ds, headers)
+            delta_t = start_s - _dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime)
+            if delta_t < 0:
+                delta_t += 24 * 3600
+            dose_at_ref = injected_dose * math.exp(-math.log(2) / half_life * delta_t)
+        suv_factor = weight_g / dose_at_ref
+        info.update({"method": f"BQML, decay to {ref_label}", "suv_factor": suv_factor,
+                     "uptake_time_min": delta_t / 60, "injected_dose_Bq": injected_dose,
+                     "weight_kg": weight_g / 1000})
+        if not 20 <= delta_t / 60 <= 240 and info["decay_correction"] != "ADMIN":
+            print(f"⚠️ Unusual uptake time {delta_t / 60:.0f} min - check the DICOM times.")
+        return pet_raw * suv_factor, info
+
+    if units == "CNTS":
+        if (0x7053, 0x1000) not in ref_ds:
+            raise ValueError("CNTS PET without Philips SUV scale factor (7053,1000).")
+        philips_suv_factor = float(ref_ds[(0x7053, 0x1000)].value)
+        if philips_suv_factor == 0:
+            raise ValueError("Philips SUV Scale Factor is 0; CNTS cannot be converted to SUV.")
+        info.update({"method": "CNTS, Philips SUV scale factor", "suv_factor": philips_suv_factor})
+        return pet_raw * philips_suv_factor, info
+
+    raise ValueError(f"Unsupported PET units: {units}")
+
+
 def PET_Organ_Cropper(
     data_dir,
     patient,
@@ -79,6 +159,8 @@ def PET_Organ_Cropper(
         - "reference_voxels" : int          voxels the reference value is based on
         - "patient_height_m", "patient_weight_kg", "patient_BMI",
           "patient_time_of_scan" : as before
+        - "suv_conversion" : dict           units, decay correction, method, SUV
+                                            factor and uptake time (for auditing)
 
         Returns None if required data (patient folder, PET data, or
         segmentations) are missing.
@@ -87,9 +169,10 @@ def PET_Organ_Cropper(
     -----
     - All organ outputs are in SUV units (not normalised).
     - Segmentation alignment uses nearest-neighbour interpolation.
-    - SUV conversion follows the main image loader: Bq/ml (BQML) with the
-      decay-corrected dose, Philips counts (CNTS) with the Philips SUV scale
-      factor (private tag 7053,1000).
+    - SUV conversion is identical to the main image loader (_pet_to_suv):
+      the SimpleITK array is already rescaled; BQML with the dose decayed to
+      the series start (DecayCorrection START) or not decayed (ADMIN); Philips
+      CNTS with the Philips SUV scale factor (private tag 7053,1000).
     """
     import os
     import numpy as np
@@ -124,12 +207,14 @@ def PET_Organ_Cropper(
 
     pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
 
-    # Header of one slice for the SUV information. Use the files the series
-    # reader found, so DICOMs without a .dcm extension are found too.
     if len(dicom_names) == 0:
         print("⚠️ No PET DICOMs found.")
         return None
-    ref_ds = pydicom.dcmread(dicom_names[0], force=True, stop_before_pixels=True)
+
+    # Headers of the series' own (sorted) files - also finds DICOMs without
+    # a .dcm extension.
+    headers = [pydicom.dcmread(f, stop_before_pixels=True, force=True) for f in dicom_names]
+    ref_ds = headers[0]
 
     weight_kg = getattr(ref_ds, "PatientWeight", None)
     height_m = getattr(ref_ds, "PatientSize", None)
@@ -141,41 +226,13 @@ def PET_Organ_Cropper(
     else:
         bmi = float(weight_kg) / (float(height_m) ** 2)
 
-    def dicom_time_to_seconds(t):
-        t = str(t)
-        return int(t[:2]) * 3600 + int(t[2:4]) * 60 + float(t[4:])
-
+    # SimpleITK applies RescaleSlope / RescaleIntercept per slice while
+    # reading, so pet_raw is already in the scanner's unit (Bq/ml for BQML).
+    # The slope must not be applied again.
     pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
-
-    units = str(ref_ds.get("Units", "Unknown")).upper()
-    print(f"PET Units: {units}")
-
-    if "BQML" in units:
-        # SimpleITK applies RescaleSlope / RescaleIntercept per slice when it
-        # reads the series, so pet_raw is already in Bq/ml.
-        weight_g = float(ref_ds.PatientWeight) * 1000
-        rad_info = ref_ds.RadiopharmaceuticalInformationSequence[0]
-        injected_dose = float(rad_info.RadionuclideTotalDose)
-        half_life = float(rad_info.RadionuclideHalfLife)
-        delta_t = (dicom_time_to_seconds(ref_ds.AcquisitionTime)
-                   - dicom_time_to_seconds(rad_info.RadiopharmaceuticalStartTime))
-        if delta_t < 0:
-            delta_t += 24 * 3600
-        decay_corrected_dose = injected_dose * math.exp(-math.log(2) / half_life * delta_t)
-        pet_np = pet_raw * (weight_g / decay_corrected_dose)
-
-    elif "CNTS" in units:
-        # Philips: SUV = (rescaled value) * Philips SUV scale factor (7053,1000).
-        # pet_raw is already rescaled by SimpleITK (see above).
-        if (0x7053, 0x1000) not in ref_ds:
-            raise ValueError("CNTS PET without Philips SUV scale factor (7053,1000).")
-        philips_suv_factor = float(ref_ds[(0x7053, 0x1000)].value)
-        if philips_suv_factor == 0:
-            raise ValueError("Philips SUV Scale Factor is 0; CNTS cannot be converted to SUV.")
-        pet_np = pet_raw * philips_suv_factor
-
-    else:
-        raise ValueError(f"Unsupported PET units: {units}")
+    pet_np, suv_info = _pet_to_suv(pet_raw, ref_ds, headers)
+    print(f"PET Units: {suv_info['units']} | {suv_info['method']} | "
+          f"factor {suv_info['suv_factor']:.4e}")
 
     segmentation_folder = os.path.join(patient_path, 'CT_segmentation')
 
@@ -297,6 +354,7 @@ def PET_Organ_Cropper(
         "patient_weight_kg": weight_kg,
         "patient_BMI": bmi,
         "patient_time_of_scan": time_scan,
+        "suv_conversion": suv_info,
     }
 
 
