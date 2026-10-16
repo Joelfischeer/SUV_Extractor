@@ -193,21 +193,13 @@ def _nifti_size(path):
         return 0
 
 
-def find_ct_source(patient_path, name_hints=None, max_depth=4, verbose=True):
+def list_ct_sources(patient_path, name_hints=None, max_depth=4):
     """
-    Select the CT image of a patient.
+    All CT candidates of a patient, best first.
 
-    Parameters
-    ----------
-    patient_path : str or Path
-    name_hints : list of str, optional
-        Preferred names in priority order, matched against file/folder name
-        (and SeriesDescription for DICOM), e.g. ["AC_CT"].
-
-    Returns
-    -------
-    dict with keys 'path' (Path: NIfTI file or DICOM folder), 'kind'
-    ('nifti' or 'dicom'), 'series_id' (DICOM only), or None.
+    Ranking: name hint, aligned '*_corrected.nii.gz' first, NIfTI before DICOM,
+    then the largest image. Each entry: dict with 'path' (Path: NIfTI file or
+    DICOM folder), 'kind' ('nifti' or 'dicom'), 'series_id' (DICOM only).
     """
     candidates = []
 
@@ -236,17 +228,55 @@ def find_ct_source(patient_path, name_hints=None, max_depth=4, verbose=True):
         candidates.append(((rank, True, 1, -len(s["files"])),
                            {"path": s["folder"], "kind": "dicom", "series_id": s["series_id"]}))
 
+    candidates.sort(key=lambda c: c[0])
+    return [c[1] for c in candidates]
+
+
+def find_ct_source(patient_path, name_hints=None, max_depth=4, verbose=True):
+    """
+    Select the CT image of a patient (best of list_ct_sources).
+
+    Returns dict with keys 'path', 'kind' ('nifti' or 'dicom'), 'series_id'
+    (DICOM only), or None.
+    """
+    candidates = list_ct_sources(patient_path, name_hints, max_depth)
     if not candidates:
         if verbose:
             print(f"⚠️ No CT found in {patient_path}")
         return None
-
-    candidates.sort(key=lambda c: c[0])
-    best = candidates[0][1]
+    best = candidates[0]
     if verbose:
         rel = os.path.relpath(best["path"], patient_path)
         print(f"CT source: {rel} ({best['kind']})")
     return best
+
+
+def find_pet_nifti(patient_path, name_hints=None, max_depth=4):
+    """
+    PET NIfTI of a patient (fallback when the PET DICOMs are faulty): a
+    .nii/.nii.gz with a 'PET' token in its name, e.g. wb_pet.nii.gz, PET.nii.
+    Masks, NAC, MIP and CT files are excluded. Ranked by name hints
+    (default: 'WB_PET' before plain 'PET'), then the largest file.
+    Returns a Path or None.
+    """
+    hints = name_hints or ["WB_PET", "PET"]
+    candidates = []
+    for dirpath, _, filenames in _walk(patient_path, max_depth):
+        for f in filenames:
+            if not f.lower().endswith(NIFTI_EXT):
+                continue
+            stem = re.sub(r"(\.nii\.gz|\.nii)$", "", f, flags=re.I)
+            tokens = _tokens(stem)
+            if "PET" not in tokens and "WBPET" not in tokens:
+                continue
+            if tokens & (NON_IMAGE_TOKENS | PET_REJECT_TOKENS | {"CT"}):
+                continue
+            p = dirpath / f
+            candidates.append(((_hint_rank([f], hints), -_nifti_size(p)), p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
 
 
 def read_ct_image(ct_source):
@@ -258,3 +288,43 @@ def read_ct_image(ct_source):
     reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
         str(ct_source["path"]), ct_source["series_id"]))
     return reader.Execute()
+
+
+def ct_candidates_for_segmentation(patient_path, name_hints=None):
+    """
+    CT images to try for a segmentation, in order: the best candidate, then
+    the other NIfTI files with 'CT' in the name, then other CT DICOM series.
+    Used to retry when a segmentation fails, e.g. because the CT DICOMs of the
+    AC_CT folder are faulty.
+    """
+    ranked = list_ct_sources(patient_path, name_hints)
+    if not ranked:
+        return []
+    rest = ranked[1:]
+    return [ranked[0]] + [c for c in rest if c["kind"] == "nifti"] + [c for c in rest if c["kind"] == "dicom"]
+
+
+def check_ct_image(ct_source):
+    """
+    Is the CT usable for a segmentation? Faulty DICOMs often load without an
+    error but give a garbage image, so the content is checked:
+    >= 20 slices, air present (1st percentile < -500 HU, every CT has air
+    around the body), tissue present (99th percentile > -200 HU), contrast.
+    Returns (ok, reason).
+    """
+    import numpy as np
+    import SimpleITK as sitk
+    try:
+        img = read_ct_image(ct_source)
+    except Exception as e:
+        return False, f"cannot be read ({e})"
+    if img.GetDimension() != 3:
+        return False, f"{img.GetDimension()}D image"
+    arr = sitk.GetArrayFromImage(img)
+    if arr.shape[0] < 20:
+        return False, f"only {arr.shape[0]} slices"
+    sample = arr[:, ::4, ::4].astype(np.float32)
+    p1, p99, sd = np.percentile(sample, 1), np.percentile(sample, 99), sample.std()
+    if p1 > -500 or p99 < -200 or sd < 20:
+        return False, f"implausible CT values (1st/99th percentile {p1:.0f}/{p99:.0f} HU, SD {sd:.0f})"
+    return True, ""

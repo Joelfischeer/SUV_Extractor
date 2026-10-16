@@ -11,6 +11,11 @@ ALL parts of its combination exist (e.g. MOOSE heart = myocardium + 4
 chambers). Substring matches are never used here, because they could compare
 different structures (heart vs heart_atrium_left).
 
+Masks too small to erode (erode_organ_masks keeps them uneroded, so eroded
+and non-eroded values would be identical) get NaN as eroded value
+(erosion_fallback = True): they are excluded from every eroded comparison,
+their non-eroded value is kept.
+
 Statistics per organ, metric and erosion level (MOOSE - TotalSegmentator):
     n, means, bias (mean difference), SD of differences, Bland-Altman 95%
     limits of agreement, relative bias in % of the pair mean, ICC(A,1)
@@ -93,24 +98,47 @@ def _organ_values(arr):
 
 def extract_patient(data_dir, patient, shared, combinations, reference_organ,
                     reference_vertebra, pet_name_hints=None, moose_model_priority=None,
-                    erosion_voxels=1):
+                    erosion_voxels=1, extra_organs=None, suv_outlier_threshold=20.0,
+                    pet_nifti_hints=None):
     """
     SUV_mean / SUV_max per tool, organ and erosion level for one patient.
 
-    Returns (rows, reference_row). rows: list of dicts with
-    patient, organ, erosion, tool, suv_mean, suv_max, voxels, erosion_fallback.
+    shared       : organs both tools provide (MOOSE vs TotalSegmentator)
+    extra_organs : dict tool -> further organs of that tool only (used for the
+                   eroded vs non-eroded analysis, e.g. MOOSE fat regions)
+
+    Returns (rows, reference_row). rows: list of dicts with patient, organ,
+    erosion, tool, shared, suv_mean, suv_max, voxels, erosion_fallback.
     """
     from Image_loading.Image_Loader import PET_Organ_Cropper, erode_organ_masks
 
     rows, reference = [], {"patient": patient}
-    for tool in TOOLS:
+    organs_by_tool = {tool: list(dict.fromkeys(list(shared) + list((extra_organs or {}).get(tool, []))))
+                      for tool in TOOLS}
+
+    def _load(tool):
         result = PET_Organ_Cropper(
-            data_dir=data_dir, patient=patient, organs_of_interest=shared,
+            data_dir=data_dir, patient=patient, organs_of_interest=organs_by_tool[tool],
             combination_logic=combinations[tool], norm_reference=reference_organ,
             reference_vertebra=reference_vertebra, segmentation_backend=tool,
-            pet_name_hints=pet_name_hints, moose_model_priority=moose_model_priority)
+            pet_name_hints=pet_name_hints, moose_model_priority=moose_model_priority,
+            suv_outlier_threshold=suv_outlier_threshold, pet_nifti_hints=pet_nifti_hints)
         if result is None:
             raise RuntimeError(f"{TOOL_LABEL[tool]} extraction failed")
+        return result
+
+    results = {tool: _load(tool) for tool in TOOLS}
+    # same PET for both tools: if the second switched to the PET NIfTI, redo the first
+    if len({r["pet_source"] for r in results.values()}) > 1:
+        for tool in TOOLS:
+            if results[tool]["pet_source"] == "dicom":
+                print(f"↻ {patient}: re-extracting {TOOL_LABEL[tool]} with the PET NIfTI")
+                results[tool] = _load(tool)
+    reference["pet_source"] = results[TOOLS[0]]["pet_source"]
+    reference["pet_issue"] = results[TOOLS[0]]["pet_issue"]
+
+    for tool in TOOLS:
+        result, tool_organs = results[tool], organs_by_tool[tool]
 
         reference[f"{tool}_suv_mean"] = result["reference_SUV_mean"]
         reference[f"{tool}_method"] = result["reference_method"]
@@ -118,10 +146,10 @@ def extract_patient(data_dir, patient, shared, combinations, reference_organ,
 
         # the reference organ is returned restricted to the vertebra level
         organs = {o: a for o, a in result["organs"].items()
-                  if o in shared and o != reference_organ}
+                  if o in tool_organs and o != reference_organ}
         eroded = erode_organ_masks(organs, erosion_config={"DEFAULT": erosion_voxels})
 
-        for organ in shared:
+        for organ in tool_organs:
             if organ == reference_organ:
                 continue
             for erosion, data in ((0, organs), (erosion_voxels, eroded)):
@@ -131,16 +159,24 @@ def extract_patient(data_dir, patient, shared, combinations, reference_organ,
                     mean, mx, vox = np.nan, np.nan, 0
                 fallback = False
                 if erosion > 0 and organ in organs:
-                    # erode_organ_masks keeps a mask uneroded if too little would remain
+                    # erode_organ_masks keeps a mask uneroded if too little would
+                    # remain. An erosion always removes voxels, so an unchanged
+                    # voxel count (= identical values) means it was not performed:
+                    # the "eroded" value is removed from every comparison.
                     fallback = vox == _organ_values(organs[organ])[2] and vox > 0
+                    if fallback:
+                        mean, mx, vox = np.nan, np.nan, np.nan
                 rows.append({"patient": patient, "organ": organ, "erosion": erosion,
-                             "tool": tool, "suv_mean": mean, "suv_max": mx,
+                             "tool": tool, "shared": organ in shared, "suv_mean": mean, "suv_max": mx,
                              "voxels": vox, "erosion_fallback": fallback})
     return rows, reference
 
 
 def to_pairs(long_df):
-    """Long table -> one row per patient/organ/erosion with both tools side by side."""
+    """Long table -> one row per patient/organ/erosion with both tools side by side
+    (organs both tools provide only)."""
+    if "shared" in long_df:
+        long_df = long_df[long_df["shared"].astype(bool)]
     wide = long_df.pivot_table(index=["patient", "organ", "erosion"], columns="tool",
                                values=["suv_mean", "suv_max", "voxels", "erosion_fallback"],
                                aggfunc="first")
@@ -174,8 +210,15 @@ def icc_a1(x, y):
     return float((msr - mse) / denom) if denom > 0 else np.nan
 
 
-def paired_stats(ts, mo):
-    """Agreement statistics for paired arrays (MOOSE - TotalSegmentator)."""
+def paired_stats(ts, mo, labels=("ts", "moose"), relative_to="pair_mean"):
+    """
+    Agreement statistics for paired arrays, differences = second - first
+    (default: MOOSE - TotalSegmentator).
+
+    labels      : names for the per-method mean/SD columns
+    relative_to : 'pair_mean' (symmetric, for two methods) or 'first'
+                  (change relative to the first, e.g. eroded vs non-eroded)
+    """
     from scipy import stats
 
     ts, mo = np.asarray(ts, float), np.asarray(mo, float)
@@ -186,12 +229,12 @@ def paired_stats(ts, mo):
     if n == 0:
         return out
     d = mo - ts
-    rel = 100 * d / ((mo + ts) / 2)
+    rel = 100 * d / (ts if relative_to == "first" else (mo + ts) / 2)
     sd = d.std(ddof=1) if n > 1 else np.nan
     rel_sd = rel.std(ddof=1) if n > 1 else np.nan
     out.update({
-        "ts_mean": ts.mean(), "ts_sd": ts.std(ddof=1) if n > 1 else np.nan,
-        "moose_mean": mo.mean(), "moose_sd": mo.std(ddof=1) if n > 1 else np.nan,
+        f"{labels[0]}_mean": ts.mean(), f"{labels[0]}_sd": ts.std(ddof=1) if n > 1 else np.nan,
+        f"{labels[1]}_mean": mo.mean(), f"{labels[1]}_sd": mo.std(ddof=1) if n > 1 else np.nan,
         "bias": d.mean(), "sd_diff": sd,
         "loa_low": d.mean() - 1.96 * sd, "loa_high": d.mean() + 1.96 * sd,
         "rel_bias_pct": rel.mean(),
@@ -229,14 +272,40 @@ def summarize(pairs, reference_df=None):
 
 
 # ---------------------------------------------------------------------------
-# Plots
+# Plots (PNG)
 # ---------------------------------------------------------------------------
-def plot_comparison(pairs, summary, pdf_path, organs_per_page=16):
-    """Multi-page PDF: scatter, Bland-Altman and relative-bias overview."""
+class _PngWriter:
+    """Writes each figure as <out_dir>/<name>.png (150 dpi)."""
+
+    def __init__(self, out_dir, dpi=150):
+        from pathlib import Path
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.dpi = dpi
+        self.files = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def savefig(self, fig, name):
+        path = self.out_dir / f"{name}.png"
+        fig.savefig(path, dpi=self.dpi, bbox_inches="tight")
+        self.files.append(path)
+
+
+def _part(start, organs_per_page, n_organs):
+    """'' if all organs fit in one figure, else '_part2' etc."""
+    return "" if n_organs <= organs_per_page else f"_part{start // organs_per_page + 1}"
+
+
+def plot_comparison(pairs, summary, out_dir, organs_per_page=16):
+    """PNGs in out_dir: scatter_<metric>, bland_altman_<metric>, relative_bias_overview."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
 
     organs = list(dict.fromkeys(pairs["organ"]))
     erosions = sorted(pairs["erosion"].unique())
@@ -255,7 +324,7 @@ def plot_comparison(pairs, summary, pdf_path, organs_per_page=16):
     def _clean(grp):
         return grp[~grp["erosion_fallback"]] if grp["erosion"].iloc[0] > 0 else grp
 
-    with PdfPages(pdf_path) as pdf:
+    with _PngWriter(out_dir) as png:
         for metric in ("suv_mean", "suv_max"):
             for start in range(0, len(organs), organs_per_page):
                 page = organs[start:start + organs_per_page]
@@ -286,7 +355,7 @@ def plot_comparison(pairs, summary, pdf_path, organs_per_page=16):
                 axes[0].legend(fontsize=7, loc="upper left")
                 fig.suptitle(f"{metric_label[metric]}: MOOSE vs TotalSegmentator (dashed = identity)")
                 fig.tight_layout()
-                pdf.savefig(fig); plt.close(fig)
+                png.savefig(fig, f"scatter_{metric}{_part(start, organs_per_page, len(organs))}"); plt.close(fig)
 
                 # --- Bland-Altman
                 fig, axes = _grid(len(page))
@@ -318,7 +387,7 @@ def plot_comparison(pairs, summary, pdf_path, organs_per_page=16):
                 axes[0].legend(fontsize=7, loc="upper left")
                 fig.suptitle(f"Bland-Altman {metric_label[metric]} (solid = bias, dotted = 95% limits of agreement)")
                 fig.tight_layout()
-                pdf.savefig(fig); plt.close(fig)
+                png.savefig(fig, f"bland_altman_{metric}{_part(start, organs_per_page, len(organs))}"); plt.close(fig)
 
         # --- overview: relative bias with limits of agreement
         s = summary[summary.organ != REFERENCE_LABEL].copy()
@@ -344,4 +413,202 @@ def plot_comparison(pairs, summary, pdf_path, organs_per_page=16):
             axes[0].invert_yaxis()
             axes[0].legend()
             fig.tight_layout()
-            pdf.savefig(fig); plt.close(fig)
+            png.savefig(fig, "relative_bias_overview"); plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Eroded vs non-eroded (within each tool)
+# ---------------------------------------------------------------------------
+def erosion_pairs(long_df):
+    """
+    One row per tool/patient/organ: non-eroded vs eroded SUV_mean/max, voxels
+    and the change caused by the erosion (eroded - non-eroded).
+    Pairs where the mask was kept uneroded (too small) are flagged.
+    """
+    df = long_df.copy()
+    df["level"] = np.where(df["erosion"] == 0, "full", "eroded")
+    wide = df.pivot_table(index=["tool", "patient", "organ"], columns="level",
+                          values=["suv_mean", "suv_max", "voxels", "erosion_fallback"],
+                          aggfunc="first")
+    wide.columns = [f"{lvl}_{val}" for val, lvl in wide.columns]
+    wide = wide.reset_index()
+    wide["erosion_fallback"] = wide.get("eroded_erosion_fallback", False)
+    wide["erosion_fallback"] = wide["erosion_fallback"].fillna(False).astype(bool)
+    wide = wide.drop(columns=[c for c in wide if c.endswith("_erosion_fallback")])
+    for metric in ("suv_mean", "suv_max"):
+        f, e = wide[f"full_{metric}"], wide[f"eroded_{metric}"]
+        wide[f"change_{metric}"] = e - f
+        wide[f"rel_change_{metric}_pct"] = 100 * (e - f) / f
+    wide["voxels_removed_pct"] = 100 * (1 - wide["eroded_voxels"] / wide["full_voxels"])
+    return wide
+
+
+def summarize_erosion(epairs):
+    """
+    Statistics of the erosion effect per tool x organ x metric:
+    change = eroded - non-eroded, relative change in % of the non-eroded value.
+    Pairs kept uneroded are excluded (they would show no change).
+    """
+    rows = []
+    for (tool, organ), grp in epairs.groupby(["tool", "organ"], sort=False):
+        n_fallback = int(grp["erosion_fallback"].sum())
+        grp = grp[~grp["erosion_fallback"]]
+        removed = grp["voxels_removed_pct"].replace([np.inf, -np.inf], np.nan)
+        for metric in ("suv_mean", "suv_max"):
+            st = paired_stats(grp[f"full_{metric}"], grp[f"eroded_{metric}"],
+                              labels=("full", "eroded"), relative_to="first")
+            rows.append({"tool": tool, "organ": organ, "metric": metric,
+                         "excluded_kept_uneroded": n_fallback,
+                         "median_voxels_removed_pct": removed.median(), **st})
+    return pd.DataFrame(rows)
+
+
+def plot_erosion(epairs, esummary, out_dir, organs_per_page=16):
+    """PNGs in out_dir: erosion_scatter_<metric> (both tools), erosion_overview."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colors = {"totalsegmentator": "tab:green", "moose": "tab:purple"}
+    metric_label = {"suv_mean": "SUV$_{mean}$", "suv_max": "SUV$_{max}$"}
+    organs = list(dict.fromkeys(epairs["organ"]))
+    data = epairs[~epairs["erosion_fallback"]]
+
+    with _PngWriter(out_dir) as png:
+        for metric in ("suv_mean", "suv_max"):
+            for start in range(0, len(organs), organs_per_page):
+                page = organs[start:start + organs_per_page]
+                cols = min(4, len(page)); rows_n = int(np.ceil(len(page) / cols))
+                fig, axes = plt.subplots(rows_n, cols, figsize=(4 * cols, 3.6 * rows_n), squeeze=False)
+                axes = axes.ravel()
+                for ax in axes[len(page):]:
+                    ax.set_visible(False)
+                for ax, organ in zip(axes, page):
+                    lo, hi = np.inf, -np.inf
+                    lines = []
+                    for tool in TOOLS:
+                        g = data[(data.organ == organ) & (data.tool == tool)]
+                        x, y = g[f"full_{metric}"], g[f"eroded_{metric}"]
+                        ok = np.isfinite(x) & np.isfinite(y)
+                        if not ok.any():
+                            continue
+                        ax.scatter(x[ok], y[ok], s=22, color=colors[tool], alpha=0.8,
+                                   label=TOOL_LABEL[tool])
+                        lo, hi = min(lo, x[ok].min(), y[ok].min()), max(hi, x[ok].max(), y[ok].max())
+                        s = esummary[(esummary.tool == tool) & (esummary.organ == organ)
+                                     & (esummary.metric == metric)]
+                        if len(s) and pd.notna(s["rel_bias_pct"].iloc[0]):
+                            lines.append(f"{TOOL_LABEL[tool][:5]} {s['rel_bias_pct'].iloc[0]:+.1f}%")
+                    if np.isfinite(lo):
+                        pad = 0.05 * (hi - lo or 1)
+                        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=0.8)
+                    ax.set_title(f"{organ}\n{'   '.join(lines)}", fontsize=9)
+                    ax.set_xlabel(f"non-eroded {metric_label[metric]}", fontsize=8)
+                    ax.set_ylabel(f"eroded {metric_label[metric]}", fontsize=8)
+                    ax.tick_params(labelsize=7)
+                axes[0].legend(fontsize=7, loc="upper left")
+                fig.suptitle(f"{metric_label[metric]}: eroded (1 voxel) vs non-eroded "
+                             f"(dashed = identity, mean relative change per tool)")
+                fig.tight_layout()
+                png.savefig(fig, f"erosion_scatter_{metric}{_part(start, organs_per_page, len(organs))}"); plt.close(fig)
+
+        # overview: relative change with 95% limits, both tools, plus voxels removed
+        fig, axes = plt.subplots(1, 3, figsize=(18, max(4, 0.45 * len(organs) + 1.5)), sharey=True,
+                                 gridspec_kw={"width_ratios": [1, 1, 0.6]})
+        y = np.arange(len(organs))
+        for ax, metric in zip(axes[:2], ("suv_mean", "suv_max")):
+            for j, tool in enumerate(TOOLS):
+                sub = (esummary[(esummary.tool == tool) & (esummary.metric == metric)]
+                       .set_index("organ").reindex(organs))
+                if "rel_bias_pct" not in sub:
+                    continue
+                yy = y + (j - 0.5) * 0.3
+                err = np.vstack([sub["rel_bias_pct"] - sub["rel_loa_low_pct"],
+                                 sub["rel_loa_high_pct"] - sub["rel_bias_pct"]])
+                ax.errorbar(sub["rel_bias_pct"], yy, xerr=err, fmt="o", color=colors[tool],
+                            ms=5, capsize=2, label=TOOL_LABEL[tool])
+            ax.axvline(0, color="k", lw=0.6)
+            ax.set_title(f"{metric_label[metric]}: change by erosion (95% limits)")
+            ax.set_xlabel("% of non-eroded value")
+            ax.grid(axis="x", alpha=0.3)
+        for j, tool in enumerate(TOOLS):
+            sub = (esummary[(esummary.tool == tool) & (esummary.metric == "suv_mean")]
+                   .set_index("organ").reindex(organs))
+            axes[2].barh(y + (j - 0.5) * 0.35, sub["median_voxels_removed_pct"], height=0.35,
+                         color=colors[tool], label=TOOL_LABEL[tool])
+        axes[2].set_title("voxels removed (median)")
+        axes[2].set_xlabel("%")
+        axes[2].set_xlim(0, 100)
+        axes[0].set_yticks(y)
+        axes[0].set_yticklabels(organs)
+        axes[0].invert_yaxis()
+        axes[0].legend()
+        fig.tight_layout()
+        png.savefig(fig, "erosion_overview"); plt.close(fig)
+
+
+def plot_boxplots(long_df, out_dir, organs_per_page=16):
+    """
+    PNG per metric: one panel per organ with four boxes next to each other -
+    TotalSegmentator non-eroded / eroded, MOOSE non-eroded / eroded - plus the
+    individual patients as points. Organs only one tool provides show only
+    that tool's boxes. Not performed erosions (NaN) are not drawn.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colors = {"totalsegmentator": "tab:green", "moose": "tab:purple"}
+    short = {"totalsegmentator": "TotalSeg", "moose": "MOOSE"}
+    metric_label = {"suv_mean": "SUV$_{mean}$", "suv_max": "SUV$_{max}$"}
+    boxes = [(tool, erosion, pos) for tool, x0 in (("totalsegmentator", 1.0), ("moose", 3.5))
+             for erosion, pos in ((0, x0), (1, x0 + 1.0))]
+
+    df = long_df.copy()
+    df["erosion"] = (df["erosion"] > 0).astype(int)
+    shared_first = (df.groupby("organ")["shared"].max().astype(bool)
+                    if "shared" in df else pd.Series(True, index=df["organ"].unique()))
+    organs = list(dict.fromkeys(df["organ"]))
+    organs = [o for o in organs if shared_first.get(o, True)] + [o for o in organs if not shared_first.get(o, True)]
+    rng = np.random.default_rng(0)
+
+    with _PngWriter(out_dir) as png:
+        for metric in ("suv_mean", "suv_max"):
+            for start in range(0, len(organs), organs_per_page):
+                page = organs[start:start + organs_per_page]
+                cols = min(4, len(page)); rows_n = int(np.ceil(len(page) / cols))
+                fig, axes = plt.subplots(rows_n, cols, figsize=(4.2 * cols, 3.8 * rows_n), squeeze=False)
+                axes = axes.ravel()
+                for ax in axes[len(page):]:
+                    ax.set_visible(False)
+                for ax, organ in zip(axes, page):
+                    ticks, labels = [], []
+                    for tool, erosion, pos in boxes:
+                        vals = df[(df.organ == organ) & (df.tool == tool) & (df.erosion == erosion)][metric]
+                        vals = vals[np.isfinite(vals)]
+                        ticks.append(pos)
+                        labels.append(f"{short[tool]}\n{'eroded' if erosion else 'full'}\nn={len(vals)}")
+                        if vals.empty:
+                            continue
+                        bp = ax.boxplot(vals, positions=[pos], widths=0.7, patch_artist=True,
+                                        showfliers=False, medianprops=dict(color="black"))
+                        box = bp["boxes"][0]
+                        box.set_facecolor(colors[tool])
+                        box.set_alpha(0.35 if erosion else 0.75)
+                        if erosion:
+                            box.set_hatch("//")
+                        ax.scatter(pos + rng.uniform(-0.18, 0.18, len(vals)), vals, s=10,
+                                   color=colors[tool], edgecolor="black", linewidth=0.3, zorder=3)
+                    ax.set_xticks(ticks)
+                    ax.set_xticklabels(labels, fontsize=7)
+                    ax.set_xlim(0.3, 5.2)
+                    ax.set_title(organ if shared_first.get(organ, True) else f"{organ} (one tool only)",
+                                 fontsize=9)
+                    ax.set_ylabel(metric_label[metric], fontsize=8)
+                    ax.tick_params(axis="y", labelsize=7)
+                    ax.grid(axis="y", alpha=0.3)
+                fig.suptitle(f"{metric_label[metric]} per organ: TotalSegmentator vs MOOSE, "
+                             f"non-eroded vs eroded (1 voxel)")
+                fig.tight_layout()
+                png.savefig(fig, f"boxplots_{metric}{_part(start, organs_per_page, len(organs))}")
+                plt.close(fig)

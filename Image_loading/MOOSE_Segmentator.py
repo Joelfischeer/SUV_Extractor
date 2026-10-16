@@ -25,7 +25,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .folder_detection import find_ct_source, read_ct_image
+from .folder_detection import ct_candidates_for_segmentation, read_ct_image, check_ct_image
 from .segmentation_sources import discover_moose_models
 
 
@@ -43,6 +43,39 @@ def _write_information_json(run_dir, models_info, ct_source):
         pass
     with open(run_dir / "MOOSE_information.json", "w") as f:
         json.dump(info, f, indent=4)
+
+
+def _run_moose_once(moose, patient_path, ct, models, accelerator):
+    """One MOOSE run with one CT; removes its run folder on failure."""
+    import shutil
+    import time
+    run_dir = patient_path / f"moosez-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+    while run_dir.exists():                        # retry within the same second
+        time.sleep(1)
+        run_dir = patient_path / f"moosez-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+    seg_dir = run_dir / "segmentations"
+    seg_dir.mkdir(parents=True)
+    (run_dir / "stats").mkdir(exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            if ct["kind"] == "nifti":
+                ct_path = str(ct["path"])
+            else:
+                # moosez needs a NIfTI path to reorient correctly to RAS
+                import SimpleITK as sitk
+                ct_path = os.path.join(tmp, "CT.nii.gz")
+                sitk.WriteImage(read_ct_image(ct), ct_path)
+            print(f"Running MOOSE {models} on {os.path.relpath(ct['path'], patient_path)} ...")
+            seg_files, used_models = moose(ct_path, models, str(seg_dir), accelerator)
+        if not seg_files:
+            raise RuntimeError("MOOSE produced no segmentation")
+        import SimpleITK as sitk
+        if not any(sitk.GetArrayFromImage(sitk.ReadImage(str(f))).any() for f in seg_files):
+            raise RuntimeError("MOOSE segmentations are all empty")
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)   # no half-finished run folders
+        raise
+    return seg_files, used_models, run_dir, seg_dir
 
 
 def moose_segment_patient(patient_path, models, ct_name_hints=None, accelerator=None,
@@ -66,32 +99,31 @@ def moose_segment_patient(patient_path, models, ct_name_hints=None, accelerator=
             print(f"   already present: {[m for m in models if m in existing]}")
         models = todo
 
-    ct = find_ct_source(patient_path, name_hints=ct_name_hints)
-    if ct is None:
+    candidates = ct_candidates_for_segmentation(patient_path, ct_name_hints)
+    if not candidates:
         raise FileNotFoundError("no CT found")
 
-    run_dir = patient_path / f"moosez-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
-    seg_dir = run_dir / "segmentations"
-    seg_dir.mkdir(parents=True, exist_ok=False)
-    (run_dir / "stats").mkdir(exist_ok=True)
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            if ct["kind"] == "nifti":
-                ct_path = str(ct["path"])
-            else:
-                # moosez needs a NIfTI path to reorient correctly to RAS
-                import SimpleITK as sitk
-                ct_path = os.path.join(tmp, "CT.nii.gz")
-                sitk.WriteImage(read_ct_image(ct), ct_path)
-
-            print(f"Running MOOSE {models} ...")
-            seg_files, used_models = moose(ct_path, models, str(seg_dir), accelerator)
-    except Exception:
-        if not any(seg_dir.iterdir()):
-            import shutil
-            shutil.rmtree(run_dir, ignore_errors=True)   # no half-empty run folders
-        raise
+    # try the CT candidates in order (e.g. faulty AC_CT DICOMs -> CT NIfTI)
+    errors = []
+    for ct in candidates:
+        rel = os.path.relpath(ct["path"], patient_path)
+        try:
+            ok, reason = check_ct_image(ct)
+            if not ok:
+                raise ValueError(f"CT not usable: {reason}")
+            seg_files, used_models, run_dir, seg_dir = _run_moose_once(
+                moose, patient_path, ct, models, accelerator)
+            break
+        except Exception as e:
+            errors.append(f"{rel} ({ct['kind']}): {e}")
+            print(f"❌ MOOSE failed with CT {rel}: {e}")
+    else:
+        raise RuntimeError("MOOSE failed with every CT: " + " | ".join(errors))
+    if errors:
+        from .issue_log import log_issue
+        log_issue(patient_path.name, "CT",
+                  f"MOOSE failed with {'; '.join(errors)} -> segmented with "
+                  f"{os.path.relpath(ct['path'], patient_path)}")
 
     models_info = {}
     for seg_file, model in zip(seg_files, used_models):

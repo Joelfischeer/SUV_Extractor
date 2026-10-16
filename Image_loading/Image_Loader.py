@@ -1,6 +1,7 @@
 import gc
 import math
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -93,142 +94,73 @@ def _restrict_to_z(mask, z_range):
     return restricted
 
 
-def PET_Organ_Cropper(
-    data_dir,
-    patient,
-    organs_of_interest,
-    combination_logic=None,
-    norm_reference="inferior_vena_cava",
-    reference_vertebra="vertebrae_L2",
-    segmentation_backend="totalsegmentator",
-    pet_name_hints=None,
-    moose_model_priority=None,
-):
-    """
-    Load PET DICOM data for a patient, convert it to SUV units, align CT-based
-    segmentations to the PET image space, and extract cropped PET volumes for
-    specified organs, plus a blood-pool reference.
+# ---------------------------------------------------------------------------
+# PET loading: DICOM, with NIfTI fallback for implausible SUVs
+# ---------------------------------------------------------------------------
+# Decisions per patient within a run, so every extraction (both tools, the
+# comparison) uses the same PET source for a patient.
+_PET_SOURCE_DECISIONS = {}
 
-    Parameters
-    ----------
-    data_dir : str or pathlib.Path
-        Root directory containing all patient subfolders.
 
-    patient : str
-        Patient identifier corresponding to a subfolder inside `data_dir`.
+def reset_pet_source_decisions():
+    _PET_SOURCE_DECISIONS.clear()
 
-    organs_of_interest : list of str
-        Organ names to extract (TotalSegmentator naming; MOOSE names are
-        mapped to it, e.g. 'vertebra_L2' -> 'vertebrae_L2'). Names must match
-        exactly (case-insensitive) or be defined in combination_logic; there
-        is no partial/substring matching. Missing organs are skipped with a
-        warning and give NaN in the results.
 
-    combination_logic : dict, optional
-        {"target_name": ["label1", "label2", ...]} - masks combined with OR.
+def pet_source_decision(patient_path):
+    """NIfTI fallback decided for this patient in this run (dict) or None."""
+    return _PET_SOURCE_DECISIONS.get(str(Path(patient_path).resolve()))
 
-    norm_reference : str
-        Segmentation used as blood-pool reference, default the inferior vena
-        cava. It is always added to the processed organs and restricted to the
-        z-range of `reference_vertebra`.
 
-    reference_vertebra : str
-        Vertebra whose z-range restricts the reference (default L2). If the
-        vertebra is missing or the restricted reference is empty, the whole
-        reference mask is used and this is reported in `reference_method`.
-
-    segmentation_backend : 'totalsegmentator' or 'moose'
-        'totalsegmentator': <patient>/CT_segmentation/<region>.nii.gz
-        'moose': <patient>/moosez-*/segmentations/ (multi-label, newest run
-                 per model)
-
-    pet_name_hints : list of str, optional
-        Preferred PET series names (folder or SeriesDescription), in priority
-        order, e.g. ["PET_WB_CORRECTED"]. Only attenuation-corrected PT series
-        in BQML/CNTS are considered in any case (see folder_detection).
-
-    moose_model_priority : list of str, optional
-        If a region is in several MOOSE models (e.g. 'aorta' in organs and
-        cardiac), the model listed first wins.
-
-    Returns
-    -------
-    dict or None
-        - "organs" : dict[str, np.ndarray]
-            Masked, tightly cropped PET volumes (SUV) per organ; the reference
-            is included under its own name (e.g. 'inferior_vena_cava'),
-            already restricted to the vertebra level.
-        - "reference_organ" : str           name of the reference
-        - "reference_SUV_mean" : float|None mean SUV of the restricted reference,
-                                            eroded in-plane by one voxel (unless that
-                                            would empty it) - divide organ SUVs by
-                                            this for the normalised values
-        - "reference_method" : str|None     e.g. 'inferior_vena_cava_L2_eroded';
-                                            anything without '_L2' used the whole mask
-        - "reference_voxels" : int          voxels the reference value is based on
-        - "patient_height_m", "patient_weight_kg", "patient_BMI",
-          "patient_time_of_scan"
-        - "suv_conversion" : dict           units, decay correction, method, SUV
-                                            factor and uptake time (for auditing)
-        - "pet_series" : str                folder (relative to the patient) of the PET used
-        - "segmentation_backend" : str
-        - "organ_sources" : dict[str, str]  segmentation (and MOOSE model) per organ
-
-        Returns None if required data (patient folder, PET data, or
-        segmentations) are missing.
-
-    Notes
-    -----
-    - All organ outputs are in SUV units (not normalised).
-    - Segmentation alignment uses nearest-neighbour interpolation.
-    """
+def _read_dicom_pet(pet):
+    """DICOM series -> (pet_sitk LPS, SUV array, headers, suv_info). Raises on failure."""
     import SimpleITK as sitk
     import pydicom
-    from scipy.ndimage import binary_erosion
 
-    print(f"\nProcessing patient: {patient}")
-    patient_path = os.path.join(data_dir, patient)
-
-    if not os.path.isdir(patient_path):
-        print("⚠️ Patient folder not found.")
-        return None
-
-    # ---------------- PET ----------------
-    pet = find_pet_series(patient_path, name_hints=pet_name_hints)
-    if pet is None:
-        return None
     dicom_names = pet["files"]
-
     reader = sitk.ImageSeriesReader()
     reader.SetFileNames(dicom_names)
-    pet_sitk = reader.Execute()
-    pet_sitk = sitk.DICOMOrient(pet_sitk, "LPS")
-
-    # Headers of the series' own (sorted) files - also finds DICOMs without
-    # a .dcm extension.
+    pet_sitk = sitk.DICOMOrient(reader.Execute(), "LPS")
     headers = [pydicom.dcmread(f, stop_before_pixels=True, force=True) for f in dicom_names]
-    ref_ds = headers[0]
-
-    weight_kg = getattr(ref_ds, "PatientWeight", None)
-    height_m = getattr(ref_ds, "PatientSize", None)
-    time_scan = getattr(ref_ds, "SeriesTime", None)
-
-    if not weight_kg or not height_m:
-        print("⚠️ Missing height or weight info.")
-        bmi = None
-    else:
-        bmi = float(weight_kg) / (float(height_m) ** 2)
-
     # SimpleITK applies RescaleSlope / RescaleIntercept per slice while
-    # reading, so pet_raw is already in the scanner's unit (Bq/ml for BQML).
-    # The slope must not be applied again.
+    # reading, so the array is already in the scanner's unit (Bq/ml for BQML).
     pet_raw = sitk.GetArrayFromImage(pet_sitk).astype(np.float32)
-    pet_np, suv_info = _pet_to_suv(pet_raw, ref_ds, headers)
-    del pet_raw
-    print(f"PET Units: {suv_info['units']} | {suv_info['method']} | "
-          f"factor {suv_info['suv_factor']:.4e}")
+    pet_np, suv_info = _pet_to_suv(pet_raw, headers[0], headers)
+    return pet_sitk, pet_np, headers, suv_info
 
-    # ---------------- Segmentations ----------------
+
+def _read_nifti_pet(path):
+    """NIfTI -> (pet_sitk LPS, raw array) - unit unknown, decided by plausibility."""
+    import SimpleITK as sitk
+    img = sitk.ReadImage(str(path))
+    if img.GetDimension() != 3:
+        raise ValueError(f"PET NIfTI has {img.GetDimension()} dimensions, expected 3")
+    img = sitk.DICOMOrient(img, "LPS")
+    return img, sitk.GetArrayFromImage(img).astype(np.float32)
+
+
+def _organ_means(cropped):
+    out = {}
+    for organ, arr in cropped.items():
+        vals = arr[arr > 0]
+        if vals.size:
+            out[organ] = float(vals.mean())
+    return out
+
+
+def _plausible(means, factor, threshold):
+    """All organ SUV_means <= threshold and the median organ in a physiological range."""
+    vals = np.array(list(means.values())) * factor
+    return bool(len(vals)) and vals.max() <= threshold and 0.2 <= np.median(vals) <= 15
+
+
+def _crop_organs(pet_sitk, pet_np, patient_path, segmentation_backend, organs_to_process,
+                 combination_logic, norm_reference, reference_vertebra, moose_model_priority):
+    """
+    Resample the segmentations to the PET grid and crop every organ (+ the
+    reference). Returns a dict or None if there is no segmentation.
+    """
+    from scipy.ndimage import binary_erosion
+
     source = get_segmentation_source(patient_path, segmentation_backend, pet_sitk,
                                      moose_model_priority=moose_model_priority)
     if source is None:
@@ -240,8 +172,8 @@ def PET_Organ_Cropper(
         if hasattr(source, "model_of") and key not in masks.combination_logic:
             return f"{key} [{source.model_of(key)}]"
         if key in masks.combination_logic:
-            parts = [match_ for match_ in (_match_segmentation(source.names(), c)
-                                           for c in masks.combination_logic[key]) if match_]
+            parts = [m for m in (_match_segmentation(source.names(), c)
+                                 for c in masks.combination_logic[key]) if m]
             return f"{key} = " + " | ".join(parts)
         return key
 
@@ -258,8 +190,6 @@ def PET_Organ_Cropper(
     else:
         print(f"⚠️ {reference_vertebra} not found - reference not restricted.")
 
-    # ---------------- Crop organs (+ the reference) ----------------
-    organs_to_process = list(dict.fromkeys(list(organs_of_interest) + [norm_reference]))
     cropped_organs, organ_sources = {}, {}
     reference_value, reference_method, reference_voxels = None, None, 0
     level = reference_vertebra.split("_")[-1].upper()          # 'L2'
@@ -321,26 +251,211 @@ def PET_Organ_Cropper(
         gc.collect()
 
     source.release()
-    del pet_sitk
+    gc.collect()
+    return {"organs": cropped_organs, "organ_sources": organ_sources,
+            "reference_SUV_mean": reference_value, "reference_method": reference_method,
+            "reference_voxels": reference_voxels, "segmentation_backend": source.backend}
+
+
+def _scale(crop_result, factor):
+    out = dict(crop_result)
+    out["organs"] = {o: a * np.float32(factor) for o, a in crop_result["organs"].items()}
+    if out["reference_SUV_mean"] is not None:
+        out["reference_SUV_mean"] = out["reference_SUV_mean"] * factor
+    return out
+
+
+def PET_Organ_Cropper(
+    data_dir,
+    patient,
+    organs_of_interest,
+    combination_logic=None,
+    norm_reference="inferior_vena_cava",
+    reference_vertebra="vertebrae_L2",
+    segmentation_backend="totalsegmentator",
+    pet_name_hints=None,
+    moose_model_priority=None,
+    suv_outlier_threshold=20.0,
+    pet_nifti_hints=None,
+):
+    """
+    Load PET data for a patient, convert it to SUV units, align CT-based
+    segmentations to the PET image space, and extract cropped PET volumes for
+    specified organs, plus a blood-pool reference.
+
+    Parameters
+    ----------
+    data_dir, patient : cohort folder and patient sub-folder.
+    organs_of_interest : list of str
+        Organ names (TotalSegmentator naming; MOOSE names are mapped to it,
+        e.g. 'vertebra_L2' -> 'vertebrae_L2'). Names must match exactly
+        (case-insensitive) or be defined in combination_logic. Missing organs
+        are skipped with a warning and give NaN in the results.
+    combination_logic : dict, optional
+        {"target_name": ["label1", "label2", ...]} - masks combined with OR.
+    norm_reference, reference_vertebra : blood-pool reference (IVC) restricted
+        to the z-range of the vertebra (L2).
+    segmentation_backend : 'totalsegmentator' or 'moose'
+    pet_name_hints : preferred PET DICOM series names.
+    moose_model_priority : MOOSE sub-model order for regions in several models.
+    suv_outlier_threshold : float
+        If any organ SUV_mean exceeds this with the DICOM PET (or the DICOM PET
+        cannot be read), the issue is logged and the PET is loaded from the
+        patient's PET NIfTI instead (e.g. wb_pet.nii.gz). Its unit is decided
+        by plausibility: scanner units x DICOM SUV factor, or already SUV.
+        If the NIfTI does not help, the DICOM values are kept and flagged.
+    pet_nifti_hints : preferred PET NIfTI names (default ['WB_PET', 'PET']).
+
+    Returns
+    -------
+    dict or None
+        "organs", "reference_organ", "reference_SUV_mean", "reference_method",
+        "reference_voxels", "patient_height_m", "patient_weight_kg",
+        "patient_BMI", "patient_time_of_scan", "suv_conversion",
+        "pet_series", "pet_source" ('dicom' or 'nifti: <file> (<unit>)'),
+        "pet_issue" ('' or a description), "segmentation_backend",
+        "organ_sources".
+        None if PET or segmentations are missing.
+    """
+    from .issue_log import log_issue
+    from .folder_detection import find_pet_nifti
+
+    print(f"\nProcessing patient: {patient}")
+    patient_path = os.path.join(data_dir, patient)
+
+    if not os.path.isdir(patient_path):
+        print("⚠️ Patient folder not found.")
+        return None
+
+    organs_to_process = list(dict.fromkeys(list(organs_of_interest) + [norm_reference]))
+    crop_args = (patient_path, segmentation_backend, organs_to_process, combination_logic,
+                 norm_reference, reference_vertebra, moose_model_priority)
+
+    # ---------------- PET: DICOM ----------------
+    pet = find_pet_series(patient_path, name_hints=pet_name_hints)
+    headers, suv_info, dicom_error = None, {}, None
+    pet_sitk = pet_np = None
+    if pet is not None:
+        try:
+            pet_sitk, pet_np, headers, suv_info = _read_dicom_pet(pet)
+            print(f"PET Units: {suv_info['units']} | {suv_info['method']} | "
+                  f"factor {suv_info['suv_factor']:.4e}")
+        except Exception as e:
+            dicom_error = f"PET DICOM could not be read/converted ({e})"
+            if headers is None:
+                try:     # headers alone (patient data, SUV factor) may still be readable
+                    import pydicom
+                    headers = [pydicom.dcmread(f, stop_before_pixels=True, force=True)
+                               for f in pet["files"]]
+                    suv_info = _pet_to_suv(np.zeros(1, np.float32), headers[0], headers)[1]
+                except Exception:
+                    pass
+    else:
+        dicom_error = "no usable PET DICOM series"
+
+    decision = pet_source_decision(patient_path)
+    result, pet_source, pet_issue = None, "dicom", ""
+
+    if dicom_error is None and decision is None:
+        result = _crop_organs(pet_sitk, pet_np, *crop_args)
+        if result is None:
+            return None
+        means = _organ_means(result["organs"])
+        outliers = {o: m for o, m in means.items() if m > suv_outlier_threshold}
+        if outliers:
+            listing = ", ".join(f"{o} {m:.1f}" for o, m in sorted(outliers.items(), key=lambda x: -x[1]))
+            pet_issue = f"SUV_mean > {suv_outlier_threshold:g} with DICOM PET: {listing}"
+    elif dicom_error is not None:
+        pet_issue = dicom_error
+    del pet_np
     gc.collect()
 
-    if reference_value is None:
+    # ---------------- PET: NIfTI fallback ----------------
+    if pet_issue or decision is not None:
+        if decision is None:
+            nifti = find_pet_nifti(patient_path, pet_nifti_hints)
+        else:
+            nifti = Path(decision["path"])
+        rel = os.path.relpath(nifti, patient_path) if nifti else None
+
+        if nifti is None:
+            if pet_issue:
+                log_issue(patient, "PET", f"{pet_issue} -> no PET NIfTI found, "
+                                         f"{'DICOM values kept - check manually' if result else 'no result'}")
+        else:
+            try:
+                nifti_sitk, nifti_raw = _read_nifti_pet(nifti)
+                raw_result = _crop_organs(nifti_sitk, nifti_raw, *crop_args)
+                del nifti_raw
+                gc.collect()
+                if raw_result is None:
+                    return None
+                if decision is not None:
+                    factor, unit = decision["factor"], decision["unit"]
+                else:
+                    raw_means = _organ_means(raw_result["organs"])
+                    options = []
+                    if suv_info.get("suv_factor"):
+                        options.append(("scanner units x DICOM SUV factor", suv_info["suv_factor"]))
+                    options.append(("already SUV", 1.0))
+                    if "SUV" in str(nifti.name).upper():
+                        options.reverse()
+                    plausible = [o for o in options
+                                 if _plausible(raw_means, o[1], suv_outlier_threshold)]
+                    unit, factor = plausible[0] if plausible else (None, None)
+                    if factor is None:
+                        log_issue(patient, "PET", f"{pet_issue} -> NIfTI {rel} gives no plausible "
+                                                  f"SUVs either (raw organ means "
+                                                  f"{', '.join(f'{o} {m:.3g}' for o, m in list(raw_means.items())[:4])}) "
+                                                  f"-> {'DICOM values kept - check segmentation/CT' if result else 'no result'}")
+                    else:
+                        _PET_SOURCE_DECISIONS[str(Path(patient_path).resolve())] = {
+                            "path": str(nifti), "factor": factor, "unit": unit, "issue": pet_issue}
+                        new_max = max(_organ_means(_scale(raw_result, factor)["organs"]).values())
+                        log_issue(patient, "PET", f"{pet_issue} -> using NIfTI {rel} ({unit}); "
+                                                  f"highest organ SUV_mean now {new_max:.2f}")
+                if factor is not None:
+                    result = _scale(raw_result, factor)
+                    pet_source = f"nifti: {rel} ({unit})"
+                    if decision is not None:
+                        pet_issue = decision["issue"]
+                    if decision is None and suv_info:
+                        suv_info = dict(suv_info, method=f"{suv_info.get('method', '')} -> NIfTI {unit}")
+            except Exception as e:
+                log_issue(patient, "PET", f"{pet_issue} -> NIfTI {rel} failed ({e})")
+
+    if result is None:
+        return None
+
+    ref_ds = headers[0] if headers else {}
+    weight_kg = ref_ds.get("PatientWeight", None) if headers else None
+    height_m = ref_ds.get("PatientSize", None) if headers else None
+    time_scan = ref_ds.get("SeriesTime", None) if headers else None
+    if not weight_kg or not height_m:
+        print("⚠️ Missing height or weight info.")
+        bmi = None
+    else:
+        bmi = float(weight_kg) / (float(height_m) ** 2)
+
+    if result["reference_SUV_mean"] is None:
         print(f"⚠️ No valid {norm_reference} reference value.")
 
     return {
-        "organs": cropped_organs,
+        "organs": result["organs"],
         "reference_organ": norm_reference,
-        "reference_SUV_mean": reference_value,
-        "reference_method": reference_method,
-        "reference_voxels": reference_voxels,
+        "reference_SUV_mean": result["reference_SUV_mean"],
+        "reference_method": result["reference_method"],
+        "reference_voxels": result["reference_voxels"],
         "patient_height_m": height_m,
         "patient_weight_kg": weight_kg,
         "patient_BMI": bmi,
         "patient_time_of_scan": time_scan,
         "suv_conversion": suv_info,
-        "pet_series": os.path.relpath(pet["folder"], patient_path),
-        "segmentation_backend": source.backend,
-        "organ_sources": organ_sources,
+        "pet_series": os.path.relpath(pet["folder"], patient_path) if pet else None,
+        "pet_source": pet_source,
+        "pet_issue": pet_issue,
+        "segmentation_backend": result["segmentation_backend"],
+        "organ_sources": result["organ_sources"],
     }
 
 
