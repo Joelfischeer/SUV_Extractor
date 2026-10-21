@@ -328,3 +328,17 @@ def check_ct_image(ct_source):
     if p1 > -500 or p99 < -200 or sd < 20:
         return False, f"implausible CT values (1st/99th percentile {p1:.0f}/{p99:.0f} HU, SD {sd:.0f})"
     return True, ""
+
+
+# Folders in a cohort folder that are never patients (BIDS and housekeeping)
+NON_PATIENT_DIRS = {"derivatives", "sourcedata", "code", "phenotype", "stimuli", "logs"}
+
+
+def list_patient_dirs(data_dir):
+    """
+    Patient folders of a cohort (sorted Paths). Skips BIDS folders such as
+    derivatives/ and sourcedata/ and hidden/underscore folders.
+    """
+    return sorted(p for p in Path(data_dir).iterdir()
+                  if p.is_dir() and p.name.lower() not in NON_PATIENT_DIRS
+                  and not p.name.startswith((".", "_")))

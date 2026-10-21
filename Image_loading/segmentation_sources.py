@@ -219,14 +219,19 @@ def discover_moose_models(patient_path, verbose=True):
     return models
 
 
-class MooseSource(_Source):
-    """Multi-label MOOSE segmentations, merged over models and runs."""
-    backend = "moose"
+class MultiLabelSource(_Source):
+    """
+    Multi-label segmentations (one file per model, label value -> name),
+    merged over models: MOOSE sub-models, CADS tasks.
+    models: {model_id: {"file": Path, "labels": {int: raw_name}, "run": str}}
+    """
+    backend = None
+    tool_label = None
 
-    def __init__(self, patient_path, pet_reference, model_priority=None, verbose=True):
+    def __init__(self, models, pet_reference, normalise, model_priority=None, verbose=True):
         super().__init__(pet_reference)
-        self.models = discover_moose_models(patient_path, verbose=verbose)
-        priority = [m.lower() for m in (model_priority or [])]
+        self.models = models
+        priority = [str(m).lower() for m in (model_priority or [])]
         order = sorted(self.models, key=lambda m: priority.index(m) if m in priority else len(priority))
 
         # region name -> (model_id, label value); higher priority model wins
@@ -234,7 +239,7 @@ class MooseSource(_Source):
         self.duplicates = []
         for model_id in order:
             for label, raw in sorted(self.models[model_id]["labels"].items()):
-                name = normalise_moose_name(raw)
+                name = normalise(raw)
                 if name in self.regions:
                     self.duplicates.append((name, self.regions[name][0], model_id))
                     continue
@@ -266,7 +271,94 @@ class MooseSource(_Source):
         self._pet_label_maps.clear()
 
     def describe(self):
-        return f"MOOSE: {len(self.models)} models, {len(self.regions)} regions"
+        return f"{self.tool_label}: {len(self.models)} models, {len(self.regions)} regions"
+
+
+class MooseSource(MultiLabelSource):
+    """Multi-label MOOSE segmentations, merged over models and runs."""
+    backend, tool_label = "moose", "MOOSE"
+
+    def __init__(self, patient_path, pet_reference, model_priority=None, verbose=True):
+        super().__init__(discover_moose_models(patient_path, verbose=verbose), pet_reference,
+                         normalise_moose_name, model_priority, verbose)
+
+
+# ---------------------------------------------------------------------------
+# CADS (https://github.com/murong-xu/CADS)
+# ---------------------------------------------------------------------------
+# CADS name -> project name (TotalSegmentator convention) where they differ
+CADS_NAME_ALIASES = {
+    "oar_glnd_thyroid": "thyroid_gland",          # task 558
+    "subcutaneous_tissue": "subcutaneous_fat",    # task 559
+    "muscle": "skeletal_muscle",                  # task 559: all skeletal muscle
+}
+CADS_PART_PATTERN = re.compile(r"^(?P<case>.+)_part_(?P<task>55[1-9])\.nii(\.gz)?$")
+
+
+def normalise_cads_name(name):
+    n = re.sub(r"[\s\-]+", "_", str(name).strip()).strip("_")
+    m = re.match(r"(?i)^vertebrae?_([CTL])(\d+)$", n)
+    if m:
+        return f"vertebrae_{m.group(1).upper()}{m.group(2)}"
+    n = n.lower()
+    return CADS_NAME_ALIASES.get(n, n)
+
+
+def discover_cads_models(patient_path, max_depth=3, verbose=True):
+    """
+    All CADS outputs of a patient: files <case>_part_<task>.nii.gz anywhere
+    below the patient folder (our runs: <patient>/cads_segmentation/; CADS
+    command line: <out>/<case>/<case>_part_<task>.nii.gz). Newest file per task.
+    Label names from a cads_labelmap.json next to the file, else the built-in
+    CADS label maps. Returns {model_id ('cads_551'): {"file", "labels", "run"}}.
+    """
+    from .cads_labelmaps import CADS_LABELMAPS
+    patient_path = Path(patient_path)
+    found = {}
+    base_depth = len(patient_path.parts)
+    for f in sorted(patient_path.rglob("*_part_55*.nii*")):
+        if len(f.parts) - base_depth > max_depth or "derivatives" in f.parts:
+            continue
+        m = CADS_PART_PATTERN.match(f.name)
+        if not m:
+            continue
+        task = int(m.group("task"))
+        if task in found and found[task].stat().st_mtime >= f.stat().st_mtime:
+            continue
+        found[task] = f
+
+    models = {}
+    for task, f in sorted(found.items()):
+        labels, source = None, "built-in"
+        lm_path = f.parent / "cads_labelmap.json"
+        if lm_path.exists():
+            try:
+                with open(lm_path) as fh:
+                    labels = {int(k): v for k, v in json.load(fh).get(str(task), {}).items()} or None
+                if labels:
+                    source = "cads_labelmap.json"
+            except Exception as e:
+                print(f"⚠️ Could not read {lm_path}: {e}")
+        labels = labels or CADS_LABELMAPS.get(task)
+        if not labels:
+            continue
+        models[f"cads_{task}"] = {"file": f, "labels": labels,
+                                  "run": f"{f.parent.relative_to(patient_path)} ({source} labels)"}
+    if verbose:
+        if not models:
+            print(f"⚠️ No CADS segmentations found in {patient_path}")
+        for model_id, mm in models.items():
+            print(f"CADS {model_id:<28} {len(mm['labels']):>3} labels  ({mm['run']})")
+    return models
+
+
+class CadsSource(MultiLabelSource):
+    """Multi-label CADS segmentations (one file per task 551-559)."""
+    backend, tool_label = "cads", "CADS"
+
+    def __init__(self, patient_path, pet_reference, model_priority=None, verbose=True):
+        super().__init__(discover_cads_models(patient_path, verbose=verbose), pet_reference,
+                         normalise_cads_name, model_priority, verbose)
 
 
 class CombinedMasks:
@@ -302,9 +394,12 @@ class CombinedMasks:
         return self.source.mask(name)
 
 
+SEGMENTATION_BACKENDS = ("totalsegmentator", "moose", "cads")
+
+
 def get_segmentation_source(patient_path, backend, pet_reference, moose_model_priority=None,
-                            ts_folder_name="CT_segmentation", verbose=True):
-    """Factory: 'totalsegmentator' or 'moose'. Returns None if nothing is found."""
+                            ts_folder_name="CT_segmentation", verbose=True, cads_task_priority=None):
+    """Factory: 'totalsegmentator', 'moose' or 'cads'. Returns None if nothing is found."""
     backend = backend.lower()
     patient_path = Path(patient_path)
     if backend == "totalsegmentator":
@@ -321,8 +416,13 @@ def get_segmentation_source(patient_path, backend, pet_reference, moose_model_pr
         src = MooseSource(patient_path, pet_reference, model_priority=moose_model_priority, verbose=verbose)
         if not src.regions:
             return None
+    elif backend == "cads":
+        priority = [f"cads_{t}" for t in (cads_task_priority or [])]
+        src = CadsSource(patient_path, pet_reference, model_priority=priority, verbose=verbose)
+        if not src.regions:
+            return None
     else:
-        raise ValueError(f"Unknown segmentation backend '{backend}' (use 'totalsegmentator' or 'moose')")
+        raise ValueError(f"Unknown segmentation backend '{backend}' (use one of {SEGMENTATION_BACKENDS})")
     if verbose:
         print(src.describe())
     return src

@@ -25,17 +25,21 @@ import argparse
 from pathlib import Path
 
 # ======================= Cohort =======================
-DATA_DIR = Path("../../Full_Body_Feature_Extraction/data/Images/Lung_cancer_leipzig")
+DATA_DIR = Path("../../Full_Body_Feature_Extraction/data/Images/Lung_cancer_vienna")
 OUTPUT_DIR = Path("../Results")
 
 # ======================= What to run (main.py) =======================
 # Each tool gives its own result table (never mixed):
-#   <cohort>_totalsegmentator_SUVs.csv  /  <cohort>_moose_SUVs.csv
-EXTRACT_TOTALSEGMENTATOR = True
-EXTRACT_MOOSE = True
-# Compare both tools (SUV_mean/max, no erosion vs 1 voxel eroded) -> TS_vs_MOOSE/
-# Needs both segmentations; missing ones are completed if SEGMENT_MISSING = True.
+#   <cohort>_totalsegmentator_SUVs.csv / <cohort>_moose_SUVs.csv / <cohort>_cads_SUVs.csv
+EXTRACT_TOTALSEGMENTATOR = False
+EXTRACT_MOOSE = False
+EXTRACT_CADS = True
+# Compare the tools (SUV_mean/max, no erosion vs 1 voxel eroded) -> tool_comparison/
+# with one sub-folder per pair (TS_vs_MOOSE, TS_vs_CADS, MOOSE_vs_CADS).
+# Needs the segmentations of every compared tool; missing ones are completed if
+# SEGMENT_MISSING = True.
 COMPARE_TOOLS = True
+COMPARISON_TOOLS = ["totalsegmentator", "moose", "cads"]
 
 # ======================= Segmentation =======================
 
@@ -67,6 +71,22 @@ SEGMENT_MISSING = True
 # True: rerun ALL required models/tasks for every patient (e.g. after a model update)
 FORCE_RESEGMENTATION = False
 
+# CADS tasks (output: <patient>/cads_segmentation); https://github.com/murong-xu/CADS
+#   551 abdominal organs, lungs, aorta, IVC   552 vertebrae (L2)   553 heart chambers,
+#   brain, bowel   554 bones, gluteal muscles   555 ribs   556 heart, radiotherapy OARs
+#   557 head tissues   558 head & neck incl. thyroid   559 subcutaneous tissue, muscle
+CADS_TASKS = [551, 552, 553, 554, 556, 558, 559]
+# Model weights: "reference" (CADS custom licence), "research" (CC BY-NC-SA 4.0,
+# recommended by the authors for academic use), "open" (CC BY-SA 4.0)
+CADS_LICENSE = "research"
+CADS_USE_CPU = False
+# CADS pins nnunetv2==2.5.2 and is best installed in its own environment. Then
+# set the command that runs its predict script there, e.g.
+#   ["conda", "run", "-n", "CADS_env", "python", "/path/to/CADS/cads/scripts/predict_images.py"]
+# None: use the 'cads' package of this environment.
+CADS_COMMAND = ["/home/joelfischer/tools/CADS/.venv/bin/python",
+                "/home/joelfischer/tools/CADS/cads/scripts/predict_images.py"]
+
 MOOSE_ACCELERATOR = None              # "cuda", "cpu", "mps" or None (auto)
 # Only within MOOSE: if a region is produced by several MOOSE sub-models
 # (e.g. aorta in clin_ct_organs and clin_ct_cardiac), the one listed first is
@@ -93,6 +113,16 @@ EROSION_CONFIG = {'DEFAULT': 1}
 SUV_MEAN_OUTLIER_THRESHOLD = 20.0
 PET_NIFTI_HINTS = ["WB_PET", "PET"]
 
+# Patient filter: exclude patients whose organ SUV_means deviate from the
+# cohort distribution by more than OUTLIER_FILTER_SD (robust) SDs in at least
+# OUTLIER_FILTER_MIN_ORGANS organs (e.g. values consistently 10x too high).
+# Excluded patients are removed from the SUV tables and the comparison, and
+# listed with the reason in <cohort>_excluded_patients.csv and the issue log.
+OUTLIER_FILTER = True
+OUTLIER_FILTER_SD = 2.0
+OUTLIER_FILTER_MIN_ORGANS = 5
+OUTLIER_FILTER_METHOD = "robust"      # "robust" (median/MAD) or "sd" (mean/SD)
+
 # ======================= PET / CT detection =======================
 # Only tie-breakers: PET must be an attenuation-corrected PT DICOM series in
 # BQML/CNTS, CT a NIfTI/DICOM with 'CT' in its name or Modality CT. If a
@@ -112,7 +142,10 @@ COMPARE_ALL_SHARED_REGIONS = False    # True: every region present in both tools
 def cohort_output_dir(output_dir, data_dir):
     """All results of a cohort: <OUTPUT_DIR>/<cohort folder name>_SUV_extraction/"""
     from pathlib import Path
-    cohort = Path(data_dir).resolve().name
+    resolved = Path(data_dir).resolve()
+    cohort = resolved.name
+    if cohort.lower() in {"train", "test", "val", "validation", "rawdata", "data"}:
+        cohort = f"{resolved.parent.name}_{cohort}"     # e.g. Multimodal_HC_train
     out = Path(output_dir) / f"{cohort}_SUV_extraction"
     out.mkdir(parents=True, exist_ok=True)
     return out, cohort
@@ -131,8 +164,10 @@ def parse_args(description, run_options=False):
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR,
                         help=f"results folder (default: {OUTPUT_DIR})")
     if run_options:
-        parser.add_argument("--backend", choices=["totalsegmentator", "moose", "both"], default=None,
-                            help="tool(s) to extract; default: EXTRACT_TOTALSEGMENTATOR / EXTRACT_MOOSE")
+        parser.add_argument("--backend", nargs="+", default=None,
+                            choices=["totalsegmentator", "moose", "cads", "both", "all"],
+                            help="tool(s) to extract, e.g. '--backend moose cads'; 'all' = all three, "
+                                 "'both' = totalsegmentator + moose; default: EXTRACT_* in config.py")
         parser.add_argument("--compare", action=argparse.BooleanOptionalAction, default=None,
                             help=f"compare both tools (default: COMPARE_TOOLS = {COMPARE_TOOLS})")
     args = parser.parse_args()
@@ -145,16 +180,20 @@ def parse_args(description, run_options=False):
 
     options = None
     if run_options:
+        all_tools = ["totalsegmentator", "moose", "cads"]
         if args.backend is None:
-            backends = [b for b, on in (("totalsegmentator", EXTRACT_TOTALSEGMENTATOR),
-                                        ("moose", EXTRACT_MOOSE)) if on]
-        elif args.backend == "both":
-            backends = ["totalsegmentator", "moose"]
+            backends = [b for b, on in zip(all_tools, (EXTRACT_TOTALSEGMENTATOR, EXTRACT_MOOSE,
+                                                       EXTRACT_CADS)) if on]
         else:
-            backends = [args.backend]
+            chosen = set(args.backend)
+            if "all" in chosen:
+                chosen |= set(all_tools)
+            if "both" in chosen:
+                chosen |= {"totalsegmentator", "moose"}
+            backends = [b for b in all_tools if b in chosen]
         compare = COMPARE_TOOLS if args.compare is None else args.compare
         if not backends and not compare:
-            parser.error("nothing to do: switch on EXTRACT_TOTALSEGMENTATOR, EXTRACT_MOOSE "
-                         "or COMPARE_TOOLS in config.py")
+            parser.error("nothing to do: switch on EXTRACT_TOTALSEGMENTATOR, EXTRACT_MOOSE, "
+                         "EXTRACT_CADS or COMPARE_TOOLS in config.py")
         options = {"backends": backends, "compare": compare}
     return data_dir, args.output_dir, options

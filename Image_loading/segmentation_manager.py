@@ -26,15 +26,23 @@ import pandas as pd
 
 from .MOOSE_Segmentator import moose_segment_patient
 from .TotalSegmentator import totalseg_segment_patient, totalseg_task_done
-from .segmentation_sources import discover_moose_models, get_segmentation_source
+from .segmentation_sources import discover_moose_models, discover_cads_models, get_segmentation_source
 from .issue_log import log_issue
+from .folder_detection import list_patient_dirs
 
 
-def missing_segmentations(patient_path, backend, moose_models, totalseg_tasks):
+def _required(backend, moose_models, totalseg_tasks, cads_tasks):
+    return list({"moose": moose_models, "cads": cads_tasks or []}.get(backend, totalseg_tasks))
+
+
+def missing_segmentations(patient_path, backend, moose_models, totalseg_tasks, cads_tasks=None):
     """Models/tasks of `backend` that are missing for this patient."""
     if backend == "moose":
         present = discover_moose_models(patient_path, verbose=False)
         return [m for m in moose_models if m.lower() not in present]
+    if backend == "cads":
+        present = discover_cads_models(patient_path, verbose=False)
+        return [t for t in (cads_tasks or []) if f"cads_{t}" not in present]
     missing = []
     for task in totalseg_tasks:
         done = totalseg_task_done(patient_path, task)
@@ -63,7 +71,9 @@ def unavailable_organs(patient_path, backend, organs, combination_logic):
 
 def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
                          segment_missing=True, force=False, organ_configs=None,
-                         ct_name_hints=None, moose_accelerator=None, totalseg_fast=False):
+                         ct_name_hints=None, moose_accelerator=None, totalseg_fast=False,
+                         cads_tasks=None, cads_license="research", cads_use_cpu=False,
+                         cads_command=None):
     """
     Check (and, if enabled, complete) the segmentations of every patient.
 
@@ -74,17 +84,17 @@ def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
     missing_after, organs_not_available.
     """
     data_dir = Path(data_dir)
-    patients = sorted(p for p in data_dir.iterdir() if p.is_dir())
+    patients = list_patient_dirs(data_dir)
     rows = []
 
     for i, patient_path in enumerate(patients, 1):
         for backend in backends:
-            missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks)
-            to_run = list(moose_models if backend == "moose" else totalseg_tasks) if force else missing
+            missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks, cads_tasks)
+            to_run = _required(backend, moose_models, totalseg_tasks, cads_tasks) if force else missing
             row = {"patient": patient_path.name, "backend": backend,
-                   "missing_before": ",".join(missing), "action": "complete"}
+                   "missing_before": ",".join(map(str, missing)), "action": "complete"}
 
-            required = list(moose_models if backend == "moose" else totalseg_tasks)
+            required = _required(backend, moose_models, totalseg_tasks, cads_tasks)
             if missing and len(missing) == len(required) and not force:
                 log_issue(patient_path.name, "segmentation",
                           f"no {backend} segmentation at all"
@@ -95,18 +105,23 @@ def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
                     if backend == "moose":
                         moose_segment_patient(patient_path, to_run, ct_name_hints=ct_name_hints,
                                               accelerator=moose_accelerator, skip_existing=False)
+                    elif backend == "cads":
+                        from .CADS_Segmentator import cads_segment_patient
+                        cads_segment_patient(patient_path, to_run, ct_name_hints=ct_name_hints,
+                                             license=cads_license, use_cpu=cads_use_cpu,
+                                             command=cads_command)
                     else:
                         totalseg_segment_patient(patient_path, to_run, fast=totalseg_fast,
                                                  ct_name_hints=ct_name_hints)
-                    row["action"] = f"ran {','.join(to_run)}"
+                    row["action"] = f"ran {','.join(map(str, to_run))}"
                 except Exception as e:
                     log_issue(patient_path.name, "segmentation", f"{backend} {to_run} failed: {e}")
                     row["action"] = f"FAILED: {e}"
-                missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks)
+                missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks, cads_tasks)
             elif missing:
                 row["action"] = "missing (SEGMENT_MISSING is off)"
 
-            row["missing_after"] = ",".join(missing)
+            row["missing_after"] = ",".join(map(str, missing))
             if organ_configs and backend in organ_configs:
                 organs, combination = organ_configs[backend]
                 row["organs_not_available"] = ",".join(

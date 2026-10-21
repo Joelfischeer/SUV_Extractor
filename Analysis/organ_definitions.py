@@ -19,9 +19,13 @@ ORGANS_OF_INTEREST = [
     'thyroid_gland',
     'brain',
     'muscle',
-    'superior_vena_cava',
     'aorta',
 ]
+
+# superior_vena_cava was removed: MOOSE has no such region and it was missing
+# for most patients. Organs can be added/removed here freely; an organ that a
+# segmentation does not provide gives NaN and is listed in the segmentation
+# status (organs_not_available).
 
 # Only in MOOSE (clin_ct_body_composition). TotalSegmentator's 'tissue_types'
 # task also produces subcutaneous_fat and skeletal_muscle (but torso_fat, not
@@ -44,11 +48,20 @@ COMBINATION_LOGIC_MOOSE_EXTRA = {
 }
 
 
+# Only in CADS among the extras (task 559): subcutaneous tissue (mapped to
+# 'subcutaneous_fat') and all skeletal muscle (mapped to 'skeletal_muscle').
+# CADS has single labels for heart (task 556) and thyroid (task 558), so no
+# combination is needed; it has no visceral fat.
+CADS_EXTRA_ORGANS = ['subcutaneous_fat', 'skeletal_muscle']
+
+
 def organ_config(backend):
-    """(organs_of_interest, combination_logic) for 'totalsegmentator' or 'moose'."""
+    """(organs_of_interest, combination_logic) for 'totalsegmentator', 'moose' or 'cads'."""
     organs = list(ORGANS_OF_INTEREST)
     combination = dict(COMBINATION_LOGIC)
     if backend.lower() == "moose":
         organs += MOOSE_EXTRA_ORGANS
         combination.update(COMBINATION_LOGIC_MOOSE_EXTRA)
+    elif backend.lower() == "cads":
+        organs += CADS_EXTRA_ORGANS
     return organs, combination

@@ -154,7 +154,8 @@ def _plausible(means, factor, threshold):
 
 
 def _crop_organs(pet_sitk, pet_np, patient_path, segmentation_backend, organs_to_process,
-                 combination_logic, norm_reference, reference_vertebra, moose_model_priority):
+                 combination_logic, norm_reference, reference_vertebra, moose_model_priority,
+                 cads_task_priority=None):
     """
     Resample the segmentations to the PET grid and crop every organ (+ the
     reference). Returns a dict or None if there is no segmentation.
@@ -162,7 +163,8 @@ def _crop_organs(pet_sitk, pet_np, patient_path, segmentation_backend, organs_to
     from scipy.ndimage import binary_erosion
 
     source = get_segmentation_source(patient_path, segmentation_backend, pet_sitk,
-                                     moose_model_priority=moose_model_priority)
+                                     moose_model_priority=moose_model_priority,
+                                     cads_task_priority=cads_task_priority)
     if source is None:
         print("⚠️ No segmentation found.")
         return None
@@ -277,6 +279,7 @@ def PET_Organ_Cropper(
     moose_model_priority=None,
     suv_outlier_threshold=20.0,
     pet_nifti_hints=None,
+    cads_task_priority=None,
 ):
     """
     Load PET data for a patient, convert it to SUV units, align CT-based
@@ -295,7 +298,8 @@ def PET_Organ_Cropper(
         {"target_name": ["label1", "label2", ...]} - masks combined with OR.
     norm_reference, reference_vertebra : blood-pool reference (IVC) restricted
         to the z-range of the vertebra (L2).
-    segmentation_backend : 'totalsegmentator' or 'moose'
+    segmentation_backend : 'totalsegmentator', 'moose' or 'cads'
+    cads_task_priority : CADS task order for regions in several tasks.
     pet_name_hints : preferred PET DICOM series names.
     moose_model_priority : MOOSE sub-model order for regions in several models.
     suv_outlier_threshold : float
@@ -329,7 +333,7 @@ def PET_Organ_Cropper(
 
     organs_to_process = list(dict.fromkeys(list(organs_of_interest) + [norm_reference]))
     crop_args = (patient_path, segmentation_backend, organs_to_process, combination_logic,
-                 norm_reference, reference_vertebra, moose_model_priority)
+                 norm_reference, reference_vertebra, moose_model_priority, cads_task_priority)
 
     # ---------------- PET: DICOM ----------------
     pet = find_pet_series(patient_path, name_hints=pet_name_hints)
@@ -353,6 +357,27 @@ def PET_Organ_Cropper(
     else:
         dicom_error = "no usable PET DICOM series"
 
+    # ---------------- PET: BIDS NIfTI (Bq/mL + sidecar), when there is no DICOM ----------------
+    bids_meta = None
+    if pet is None:
+        from download.EPICT_RH.bids_cohort import find_bids_pet, bids_suv_factor, bids_patient_info
+        bids = find_bids_pet(patient_path)
+        if bids is not None:
+            nifti_path, sidecar = bids
+            cohort_dir = Path(patient_path).parent
+            factor, suv_info, warning = bids_suv_factor(patient, sidecar, cohort_dir)
+            if warning:
+                log_issue(patient, "PET", warning)
+            if factor is not None:
+                pet_sitk, raw = _read_nifti_pet(nifti_path)
+                pet_np = raw * np.float32(factor)
+                del raw
+                dicom_error = None
+                bids_meta = {"path": nifti_path, "sidecar": sidecar,
+                             "clinical": bids_patient_info(patient, cohort_dir)}
+                print(f"PET (BIDS): {os.path.relpath(nifti_path, patient_path)} | "
+                      f"{suv_info['method']} | factor {factor:.4e}")
+
     decision = pet_source_decision(patient_path)
     result, pet_source, pet_issue = None, "dicom", ""
 
@@ -371,7 +396,11 @@ def PET_Organ_Cropper(
     gc.collect()
 
     # ---------------- PET: NIfTI fallback ----------------
-    if pet_issue or decision is not None:
+    if bids_meta is not None and pet_issue:
+        # the BIDS NIfTI already is the original PET - another NIfTI would be a
+        # different reconstruction (non-AC, dynamic), so only report
+        log_issue(patient, "PET", f"{pet_issue} (BIDS PET) -> values kept - check manually")
+    elif pet_issue or decision is not None:
         if decision is None:
             nifti = find_pet_nifti(patient_path, pet_nifti_hints)
         else:
@@ -431,6 +460,16 @@ def PET_Organ_Cropper(
     weight_kg = ref_ds.get("PatientWeight", None) if headers else None
     height_m = ref_ds.get("PatientSize", None) if headers else None
     time_scan = ref_ds.get("SeriesTime", None) if headers else None
+    age, sex = None, None
+    if headers:
+        age_text = str(ref_ds.get("PatientAge", "") or "")      # DICOM '045Y'
+        age = float(age_text[:-1]) if age_text[:-1].isdigit() and age_text.endswith("Y") else None
+        sex = str(ref_ds.get("PatientSex", "") or "") or None
+    if bids_meta is not None:
+        clin = bids_meta["clinical"]
+        weight_kg, height_m = clin["weight_kg"], clin["height_m"]
+        age, sex = clin["age"], clin["sex"]
+        time_scan = bids_meta["sidecar"].get("TimeZero")
     if not weight_kg or not height_m:
         print("⚠️ Missing height or weight info.")
         bmi = None
@@ -450,9 +489,12 @@ def PET_Organ_Cropper(
         "patient_weight_kg": weight_kg,
         "patient_BMI": bmi,
         "patient_time_of_scan": time_scan,
+        "patient_age": age,
+        "patient_sex": sex,
         "suv_conversion": suv_info,
-        "pet_series": os.path.relpath(pet["folder"], patient_path) if pet else None,
-        "pet_source": pet_source,
+        "pet_series": (os.path.relpath(pet["folder"], patient_path) if pet else
+                       os.path.relpath(bids_meta["path"], patient_path) if bids_meta else None),
+        "pet_source": "bids nifti" if (bids_meta is not None and pet_source == "dicom") else pet_source,
         "pet_issue": pet_issue,
         "segmentation_backend": result["segmentation_backend"],
         "organ_sources": result["organ_sources"],

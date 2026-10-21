@@ -10,13 +10,15 @@ import pandas as pd
 
 import config as cfg
 from Analysis.organ_definitions import organ_config
-from Image_loading.folder_detection import find_pet_series, find_ct_source
-from Image_loading.segmentation_sources import discover_moose_models, normalise_moose_name, seg_name
+from Image_loading.folder_detection import find_pet_series, find_ct_source, list_patient_dirs
+from Image_loading.segmentation_sources import (discover_moose_models, normalise_moose_name, seg_name,
+                                                discover_cads_models, normalise_cads_name)
 
 # Same organs and combinations as the extraction (Analysis/organ_definitions.py)
 ORGANS_TS, COMBINED_TS = organ_config("totalsegmentator")
 ORGANS_MOOSE, COMBINED_MOOSE = organ_config("moose")
-ORGANS = list(dict.fromkeys(ORGANS_TS + ORGANS_MOOSE + list(COMBINED_TS) + list(COMBINED_MOOSE)
+ORGANS_CADS, COMBINED_CADS = organ_config("cads")
+ORGANS = list(dict.fromkeys(ORGANS_TS + ORGANS_MOOSE + ORGANS_CADS + list(COMBINED_TS) + list(COMBINED_MOOSE)
                             + [cfg.REFERENCE_ORGAN, cfg.REFERENCE_VERTEBRA]))
 
 
@@ -32,7 +34,7 @@ def available(names, organ, combined):
 def main(data_dir, output_dir):
     data_dir = Path(data_dir)
     rows = []
-    for patient in sorted(p for p in data_dir.iterdir() if p.is_dir()):
+    for patient in list_patient_dirs(data_dir):
         print(f"\n===== {patient.name}")
         pet = find_pet_series(patient, name_hints=cfg.PET_NAME_HINTS)
         ct = find_ct_source(patient, name_hints=cfg.CT_NAME_HINTS)
@@ -46,11 +48,15 @@ def main(data_dir, output_dir):
         ts_names = [f.name for f in ts.iterdir()] if ts.is_dir() else []
         models = discover_moose_models(patient)
         moose_names = [normalise_moose_name(n) for m in models.values() for n in m["labels"].values()]
+        cads = discover_cads_models(patient)
+        cads_names = [normalise_cads_name(n) for m in cads.values() for n in m["labels"].values()]
         row["ts_regions"] = len(ts_names)
         row["moose_models"] = ",".join(models)
+        row["cads_tasks"] = ",".join(m.replace("cads_", "") for m in cads)
         for organ in ORGANS:
             row[f"TS:{organ}"] = available(ts_names, organ, COMBINED_TS)
             row[f"MOOSE:{organ}"] = available(moose_names, organ, COMBINED_MOOSE)
+            row[f"CADS:{organ}"] = available(cads_names, organ, COMBINED_CADS)
         rows.append(row)
 
         if models:
@@ -66,9 +72,11 @@ def main(data_dir, output_dir):
     for organ in ORGANS:
         ts_n = df[f"TS:{organ}"].isin(["exact", "combined"]).sum()
         mo_n = df[f"MOOSE:{organ}"].isin(["exact", "combined"]).sum()
-        partial = [t for t in ("TS", "MOOSE") if (df[f"{t}:{organ}"] == "partial").any()]
+        ca_n = df[f"CADS:{organ}"].isin(["exact", "combined"]).sum()
+        partial = [t for t in ("TS", "MOOSE", "CADS") if (df[f"{t}:{organ}"] == "partial").any()]
         note = f"  ⚠️ incomplete combination in {', '.join(partial)}" if partial else ""
-        print(f"  {organ:<22} TS {ts_n:>3}/{len(df)}   MOOSE {mo_n:>3}/{len(df)}{note}")
+        print(f"  {organ:<22} TS {ts_n:>3}/{len(df)}   MOOSE {mo_n:>3}/{len(df)}   "
+              f"CADS {ca_n:>3}/{len(df)}{note}")
 
 
 if __name__ == "__main__":

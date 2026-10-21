@@ -25,7 +25,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .folder_detection import ct_candidates_for_segmentation, read_ct_image, check_ct_image
+from .folder_detection import (ct_candidates_for_segmentation, read_ct_image, check_ct_image,
+                               list_patient_dirs)
 from .segmentation_sources import discover_moose_models
 
 
@@ -143,7 +144,7 @@ def moose_segment_images(data_dir, models, ct_name_hints=None, accelerator=None,
     """
     data_dir = Path(data_dir)
     failed = []
-    patients = sorted(p for p in data_dir.iterdir() if p.is_dir())
+    patients = list_patient_dirs(data_dir)
 
     for i, patient_path in enumerate(patients, 1):
         print(f"\n[{i}/{len(patients)}] MOOSE: {patient_path.name}")

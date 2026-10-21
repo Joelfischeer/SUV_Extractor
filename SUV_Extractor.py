@@ -13,7 +13,9 @@ line, so another cohort needs no code change:
 What runs is set in config.py:
     EXTRACT_TOTALSEGMENTATOR  -> <cohort>_totalsegmentator_SUVs.csv
     EXTRACT_MOOSE             -> <cohort>_moose_SUVs.csv
-    COMPARE_TOOLS             -> TS_vs_MOOSE/ (agreement statistics and plots)
+    EXTRACT_CADS              -> <cohort>_cads_SUVs.csv
+    COMPARE_TOOLS             -> tool_comparison/ (agreement statistics and plots,
+                                 one sub-folder per pair of tools)
 all in <OUTPUT_DIR>/<cohort>_SUV_extraction/. The tools are never mixed:
 each table comes from one tool only.
 
@@ -49,6 +51,10 @@ the DICOM PET, the patient is logged in <cohort>_patient_issues.txt and the PET
 is loaded from the patient's PET NIfTI instead (columns pet_source, pet_issue).
 All tables use the same PET source per patient.
 
+Patient filter (OUTLIER_FILTER): patients deviating > 2 robust SD from the
+cohort in >= 5 organs are removed from all tables and the comparison
+(<cohort>_excluded_patients.csv).
+
 NORMALIZE: organ values divided by the mean SUV of the inferior vena cava at
 the L2 level (eroded in-plane). reference_SUV_mean / reference_method are
 always written to the CSV.
@@ -76,6 +82,7 @@ def extract_patient_row(data_dir, patient, backend, organs_of_interest, combinat
         moose_model_priority=cfg.MOOSE_SUBMODEL_PRIORITY,
         suv_outlier_threshold=cfg.SUV_MEAN_OUTLIER_THRESHOLD,
         pet_nifti_hints=cfg.PET_NIFTI_HINTS,
+        cads_task_priority=cfg.CADS_TASKS,
     )
     if result is None:
         return None
@@ -108,6 +115,8 @@ def extract_patient_row(data_dir, patient, backend, organs_of_interest, combinat
     row['height_m'] = result["patient_height_m"]
     row['weight_kg'] = result["patient_weight_kg"]
     row['bmi'] = result["patient_BMI"]
+    row['age'] = result.get("patient_age")
+    row['sex'] = result.get("patient_sex")
     row['time_of_scan'] = result["patient_time_of_scan"]
     row['uptake_time_min'] = result["suv_conversion"].get("uptake_time_min")
     row['normalized'] = cfg.NORMALIZE
@@ -150,12 +159,17 @@ def run_extraction(data_dir, output_dir, backend):
         ct_name_hints=cfg.CT_NAME_HINTS,
         moose_accelerator=cfg.MOOSE_ACCELERATOR,
         totalseg_fast=cfg.TOTALSEG_FAST,
+        cads_tasks=cfg.CADS_TASKS,
+        cads_license=cfg.CADS_LICENSE,
+        cads_use_cpu=cfg.CADS_USE_CPU,
+        cads_command=cfg.CADS_COMMAND,
     )
     status.to_csv(out_dir / f"{cohort}_{backend}_segmentation_status.csv", index=False, sep=";")
 
     # ======================= SUV extraction =======================
     rows, failed = [], []
-    for patient in sorted(p.name for p in data_dir.iterdir() if p.is_dir()):
+    from Image_loading.folder_detection import list_patient_dirs
+    for patient in [p.name for p in list_patient_dirs(data_dir)]:
         try:
             row = extract_patient_row(data_dir, patient, backend, organs_of_interest, combination_logic)
         except Exception as e:
@@ -188,6 +202,47 @@ def make_pet_sources_consistent(data_dir, tables):
                     rows[i] = new
 
 
+def apply_patient_filter(tables, out_dir, cohort):
+    """
+    Find patients with implausible values in many organs (config.py,
+    OUTLIER_FILTER_*) in every table. A patient excluded in one table is
+    removed from all tables (and the comparison), so they stay comparable.
+    Returns the set of excluded patients.
+    """
+    import pandas as pd
+    from Analysis.outlier_filter import find_outlier_patients, organ_mean_columns
+    from Image_loading.issue_log import log_issue
+
+    reports = []
+    for backend, (rows, _) in tables.items():
+        if not rows:
+            continue
+        df = pd.DataFrame(rows)
+        rep = find_outlier_patients(df, organ_mean_columns(df), n_sd=cfg.OUTLIER_FILTER_SD,
+                                    min_organs=cfg.OUTLIER_FILTER_MIN_ORGANS,
+                                    method=cfg.OUTLIER_FILTER_METHOD)
+        reports.append(rep.assign(table=backend))
+    if not reports:
+        return set()
+
+    report = pd.concat(reports, ignore_index=True)
+    excluded = set(report.loc[report["excluded"], "patient"])
+    report = report[report["n_outlier_organs"] > 0].sort_values(
+        ["excluded", "n_outlier_organs"], ascending=False)
+    report.to_csv(out_dir / f"{cohort}_excluded_patients.csv", index=False, sep=";")
+
+    for _, r in report[report["excluded"]].iterrows():
+        log_issue(r["patient"], "filter",
+                  f"excluded ({r['table']}): {r['n_outlier_organs']} of {r['n_organs_checked']} organs "
+                  f"> {cfg.OUTLIER_FILTER_SD:g} SD from the cohort: {r['outlier_organs']}")
+    for backend, (rows, path) in tables.items():
+        tables[backend] = ([r for r in rows if r["Patient"] not in excluded], path)
+
+    print(f"\nPatient filter: {len(excluded)} excluded {sorted(excluded)} "
+          f"-> {cohort}_excluded_patients.csv")
+    return excluded
+
+
 def main():
     from Image_loading.issue_log import set_issue_log
     from Image_loading.Image_Loader import reset_pet_source_decisions
@@ -206,6 +261,7 @@ def main():
     tables = {backend: run_extraction(data_dir, output_dir, backend)
               for backend in options["backends"]}
     make_pet_sources_consistent(data_dir, tables)
+    excluded = apply_patient_filter(tables, out_dir, cohort) if cfg.OUTLIER_FILTER else set()
     for backend, (rows, output_path) in tables.items():
         if rows:
             results_saver(rows, output_path)
@@ -214,7 +270,7 @@ def main():
 
     if options["compare"]:
         from Analysis.compare_segmentations import run_comparison
-        run_comparison(data_dir, output_dir)
+        run_comparison(data_dir, output_dir, excluded_patients=excluded)
 
     print(f"\nPatient issues: {out_dir / f'{cohort}_patient_issues.txt'}")
 
