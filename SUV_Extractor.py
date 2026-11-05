@@ -162,7 +162,7 @@ def run_extraction(data_dir, output_dir, backend):
         cads_tasks=cfg.CADS_TASKS,
         cads_license=cfg.CADS_LICENSE,
         cads_use_cpu=cfg.CADS_USE_CPU,
-        cads_command=cfg.CADS_COMMAND,
+        cads_command=cfg.CADS_COMMAND, cads_one_run=cfg.CADS_ONE_RUN_PER_PATIENT,
     )
     status.to_csv(out_dir / f"{cohort}_{backend}_segmentation_status.csv", index=False, sep=";")
 

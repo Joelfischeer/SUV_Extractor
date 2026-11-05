@@ -73,7 +73,7 @@ def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
                          segment_missing=True, force=False, organ_configs=None,
                          ct_name_hints=None, moose_accelerator=None, totalseg_fast=False,
                          cads_tasks=None, cads_license="research", cads_use_cpu=False,
-                         cads_command=None):
+                         cads_command=None, cads_one_run=True):
     """
     Check (and, if enabled, complete) the segmentations of every patient.
 
@@ -86,20 +86,47 @@ def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
     data_dir = Path(data_dir)
     patients = list_patient_dirs(data_dir)
     rows = []
+    # a tool that fails for several patients in a row (installation, weights,
+    # GPU) is not tried again for the rest of the run
+    max_failures_in_row = 3
+    failures_in_row = {b: 0 for b in backends}
+    disabled = {}
+    # TotalSegmentator tasks that need a licence the user does not have
+    ts_blocked = []
+    if "totalsegmentator" in backends and (segment_missing or force):
+        from .TotalSegmentator import check_totalseg_license
+        ts_blocked, message = check_totalseg_license(list(totalseg_tasks))
+        if ts_blocked:
+            print("❌ " + message)
+            log_issue("ALL", "segmentation", message)
 
     for i, patient_path in enumerate(patients, 1):
         for backend in backends:
             missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks, cads_tasks)
             to_run = _required(backend, moose_models, totalseg_tasks, cads_tasks) if force else missing
+            if backend == "totalsegmentator" and ts_blocked:
+                to_run = [t for t in to_run if t not in ts_blocked]
             row = {"patient": patient_path.name, "backend": backend,
                    "missing_before": ",".join(map(str, missing)), "action": "complete"}
 
             required = _required(backend, moose_models, totalseg_tasks, cads_tasks)
-            if missing and len(missing) == len(required) and not force:
+            if missing and len(missing) == len(required) and not force and backend not in disabled:
                 log_issue(patient_path.name, "segmentation",
                           f"no {backend} segmentation at all"
-                          + (" -> segmenting now" if segment_missing else " (SEGMENT_MISSING is off)"))
-            if to_run and (segment_missing or force):
+                          + (f" ({backend} disabled for this run)" if backend in disabled else
+                             " -> segmenting now" if segment_missing else " (SEGMENT_MISSING is off)"))
+            if backend == "cads" and to_run and (segment_missing or force) and "cads_checked" not in disabled:
+                # check the CADS environment once, before the first CADS run
+                from .CADS_Segmentator import check_cads_setup
+                ok, message = check_cads_setup(cads_command, cads_use_cpu)
+                disabled["cads_checked"] = True
+                print(("✅ " if ok else "❌ ") + message)
+                if not ok:
+                    disabled["cads"] = f"setup check failed: {message}"
+                    log_issue("ALL", "segmentation", f"CADS not run in this run - {message}")
+            if to_run and (segment_missing or force) and backend in disabled:
+                row["action"] = f"skipped ({backend} disabled for this run)"
+            elif to_run and (segment_missing or force):
                 print(f"\n[{i}/{len(patients)}] {patient_path.name}: running {backend} {to_run}")
                 try:
                     if backend == "moose":
@@ -109,15 +136,24 @@ def ensure_segmentations(data_dir, backends, moose_models, totalseg_tasks,
                         from .CADS_Segmentator import cads_segment_patient
                         cads_segment_patient(patient_path, to_run, ct_name_hints=ct_name_hints,
                                              license=cads_license, use_cpu=cads_use_cpu,
-                                             command=cads_command)
+                                             command=cads_command, one_run=cads_one_run)
                     else:
                         totalseg_segment_patient(patient_path, to_run, fast=totalseg_fast,
                                                  ct_name_hints=ct_name_hints)
                     row["action"] = f"ran {','.join(map(str, to_run))}"
+                    failures_in_row[backend] = 0
                 except Exception as e:
                     log_issue(patient_path.name, "segmentation", f"{backend} {to_run} failed: {e}")
                     row["action"] = f"FAILED: {e}"
+                    failures_in_row[backend] += 1
+                    if failures_in_row[backend] >= max_failures_in_row:
+                        disabled[backend] = f"failed for {max_failures_in_row} patients in a row"
+                        log_issue("ALL", "segmentation",
+                                  f"{backend} failed for {max_failures_in_row} patients in a row - not tried "
+                                  f"again in this run. Probably an installation problem; last error: {e}")
                 missing = missing_segmentations(patient_path, backend, moose_models, totalseg_tasks, cads_tasks)
+            elif missing and backend == "totalsegmentator" and set(missing) <= set(ts_blocked):
+                row["action"] = f"missing (no TotalSegmentator licence for {','.join(missing)})"
             elif missing:
                 row["action"] = "missing (SEGMENT_MISSING is off)"
 
@@ -141,8 +177,14 @@ def _print_summary(status, n_patients):
         failed = grp["action"].str.startswith("FAILED").sum()
         print(f"{backend}: {complete}/{n_patients} complete, {ran} completed now, {failed} failed")
         incomplete = grp[grp["missing_after"] != ""]
-        for _, r in incomplete.iterrows():
-            print(f"   {r['patient']}: missing {r['missing_after']}  ({r['action']})")
+        # identical cases grouped (e.g. a tool disabled for the whole run)
+        for (missing, action), cases in incomplete.groupby(["missing_after", "action"], sort=False):
+            names = list(cases["patient"])
+            if len(names) <= 3:
+                for name in names:
+                    print(f"   {name}: missing {missing}  ({action})")
+            else:
+                print(f"   {len(names)} patients ({', '.join(names[:3])}, ...): missing {missing}  ({action})")
         if "organs_not_available" in grp:
             counts = (grp["organs_not_available"].str.split(",").explode()
                       .loc[lambda s: s != ""].value_counts())

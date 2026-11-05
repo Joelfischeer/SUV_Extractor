@@ -25,15 +25,15 @@ import argparse
 from pathlib import Path
 
 # ======================= Cohort =======================
-DATA_DIR = Path("../../Full_Body_Feature_Extraction/data/Images/Lung_cancer_vienna")
+DATA_DIR = Path("../../Full_Body_Feature_Extraction/data/Images/Lung_cancer_leipzig")
 OUTPUT_DIR = Path("../Results")
 
 # ======================= What to run (main.py) =======================
 # Each tool gives its own result table (never mixed):
 #   <cohort>_totalsegmentator_SUVs.csv / <cohort>_moose_SUVs.csv / <cohort>_cads_SUVs.csv
 EXTRACT_TOTALSEGMENTATOR = False
-EXTRACT_MOOSE = False
-EXTRACT_CADS = True
+EXTRACT_MOOSE = True
+EXTRACT_CADS = False
 # Compare the tools (SUV_mean/max, no erosion vs 1 voxel eroded) -> tool_comparison/
 # with one sub-folder per pair (TS_vs_MOOSE, TS_vs_CADS, MOOSE_vs_CADS).
 # Needs the segmentations of every compared tool; missing ones are completed if
@@ -48,7 +48,12 @@ COMPARISON_TOOLS = ["totalsegmentator", "moose", "cads"]
 # TotalSegmentator tasks (output: <patient>/CT_segmentation); known tasks:
 # "total", "body", "lung_nodules", "tissue_types" (see TOTALSEG_TASK_MARKERS
 # in Image_loading/Segmentator.py to add others)
-TOTALSEG_TASKS = ["total"]
+# "tissue_types" (subcutaneous_fat, torso_fat -> used as visceral_fat,
+# skeletal_muscle) needs a TotalSegmentator licence, free for academic use:
+#   https://backend.totalsegmentator.com/license-academic/
+# set once with:  uv run totalseg_set_license -l <licence number>
+# Without a licence it is skipped (logged) and 'total' still runs.
+TOTALSEG_TASKS = ["total", "tissue_types"]
 TOTALSEG_FAST = False
 
 # MOOSE sub-models (output: <patient>/moosez-<timestamp>)
@@ -84,8 +89,10 @@ CADS_USE_CPU = False
 # set the command that runs its predict script there, e.g.
 #   ["conda", "run", "-n", "CADS_env", "python", "/path/to/CADS/cads/scripts/predict_images.py"]
 # None: use the 'cads' package of this environment.
-CADS_COMMAND = ["/home/joelfischer/tools/CADS/.venv/bin/python",
-                "/home/joelfischer/tools/CADS/cads/scripts/predict_images.py"]
+CADS_COMMAND = None
+# True: all CADS tasks of a patient in one run (one preprocessing of the CT,
+# ~40 % faster); falls back to one call per task if that fails.
+CADS_ONE_RUN_PER_PATIENT = True
 
 MOOSE_ACCELERATOR = None              # "cuda", "cpu", "mps" or None (auto)
 # Only within MOOSE: if a region is produced by several MOOSE sub-models
@@ -95,14 +102,14 @@ MOOSE_SUBMODEL_PRIORITY = MOOSE_MODELS
 
 # ======================= SUV extraction =======================
 NORMALIZE = False
-ERODE = True
+ERODE = False
 
 # Blood-pool reference
 REFERENCE_ORGAN = "inferior_vena_cava"
 REFERENCE_VERTEBRA = "vertebrae_L2"
 
 # Erosion in voxels per organ (DEFAULT for all others)
-EROSION_CONFIG = {'DEFAULT': 1}
+EROSION_CONFIG = {'DEFAULT': 0}
 
 # Outlier protection: if any organ SUV_mean exceeds this with the DICOM PET
 # (or the PET DICOMs cannot be read), the patient is written to

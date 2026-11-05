@@ -53,6 +53,59 @@ def totalseg_task_done(patient_path, task):
     return all(f"{m.lower()}.nii.gz" in present for m in markers)
 
 
+# Fallback if the installed TotalSegmentator has no map_tasks_config module
+# (older versions): tasks that need a licence / do not allow --fast, as
+# defined in TotalSegmentator 2.18 (totalsegmentator/map_tasks_config.py).
+_LICENSED_TASKS = {
+    "aorta_annulus", "aortic_dissection", "aortic_sinuses", "appendicular_bones",
+    "appendicular_bones_mr", "brain_structures", "coronary_arteries", "coronary_arteries_LEGACY",
+    "face", "face_mr", "heartchambers_highres", "pulmonary_artery_landmarks", "renal_arteries",
+    "thigh_shoulder_muscles", "thigh_shoulder_muscles_mr", "tissue_4_types", "tissue_types",
+    "tissue_types_mr"}
+_NO_FAST_TASKS = _LICENSED_TASKS | {
+    "abdominal_muscles", "brain_aneurysm", "breasts", "cerebral_bleed", "craniofacial_structures",
+    "head_glands_cavities", "head_muscles", "headneck_bones_vessels", "headneck_muscles",
+    "hip_implant", "kidney_cysts", "liver_lesions", "liver_lesions_mr", "liver_segments",
+    "liver_segments_mr", "liver_vessels", "lung_nodules", "lung_vessels_LEGACY",
+    "oculomotor_muscles", "pleural_pericard_effusion", "teeth", "trunk_cavities",
+    "ventricle_parts", "vertebrae_body", "vertebrae_pp", "vertebrae_pp_refined"}
+
+
+def _task_config(task):
+    """
+    TotalSegmentator's own configuration of a task, read from the installed
+    package (totalsegmentator/map_tasks_config.py, TASK_CONFIGS). Older
+    versions without that module: the built-in lists above.
+    """
+    try:
+        from totalsegmentator.map_tasks_config import TASK_CONFIGS
+        return TASK_CONFIGS.get(task, {}) or {}
+    except Exception:
+        return {"commercial": task in _LICENSED_TASKS, "disallow_fast": task in _NO_FAST_TASKS}
+
+
+def check_totalseg_license(tasks):
+    """
+    Tasks that need a TotalSegmentator licence (e.g. tissue_types) but have
+    none. TotalSegmentator would end the whole Python process (sys.exit) for
+    them, so they are skipped instead. Returns (blocked_tasks, message).
+    """
+    licensed = [t for t in tasks if _task_config(t).get("commercial")]
+    if not licensed:
+        return [], ""
+    try:
+        from totalsegmentator.config import has_valid_license_offline
+        status, message = has_valid_license_offline()
+    except Exception as e:
+        status, message = "unknown", f"licence status could not be checked ({e})"
+    if status == "yes":
+        return [], ""
+    return licensed, (f"TotalSegmentator task(s) {licensed} need a licence ({message.replace('ERROR: ', '')}) - "
+                      f"skipped in this run. Free academic licence: "
+                      f"https://backend.totalsegmentator.com/license-academic/ , then once: "
+                      f"uv run totalseg_set_license -l <your licence number>")
+
+
 def _stamp_name(task):
     return f".totalseg_{task}.done"
 
@@ -111,8 +164,14 @@ def totalseg_segment_patient(patient_path, tasks, fast=False, ct_name_hints=None
                 if aligned.exists():
                     ct = {"path": aligned, "kind": "nifti", "series_id": None}
             for task in tasks:
+                # some tasks (e.g. tissue_types) do not allow the fast mode
+                task_fast = fast and not _task_config(task).get("disallow_fast")
                 print(f"Running TotalSegmentator task '{task}' on {rel} ...")
-                totalsegmentator(ct["path"], output_dir, fast=fast, task=task)
+                try:
+                    totalsegmentator(ct["path"], output_dir, fast=task_fast, task=task)
+                except SystemExit as e:      # TotalSegmentator exits e.g. without a licence
+                    raise RuntimeError(f"TotalSegmentator stopped for task '{task}' (exit {e.code}) - "
+                                       f"licence missing?") from None
                 _check_task_output(output_dir, task)
                 (Path(output_dir) / _stamp_name(task)).write_text(f"{ct['path']}\n")
             break

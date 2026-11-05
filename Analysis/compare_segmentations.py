@@ -96,7 +96,7 @@ def run_comparison(data_dir, output_dir, standalone=False, excluded_patients=Non
         segment_missing=cfg.SEGMENT_MISSING, force=cfg.FORCE_RESEGMENTATION,
         ct_name_hints=cfg.CT_NAME_HINTS, moose_accelerator=cfg.MOOSE_ACCELERATOR,
         totalseg_fast=cfg.TOTALSEG_FAST, cads_tasks=cfg.CADS_TASKS, cads_license=cfg.CADS_LICENSE,
-        cads_use_cpu=cfg.CADS_USE_CPU, cads_command=cfg.CADS_COMMAND)
+        cads_use_cpu=cfg.CADS_USE_CPU, cads_command=cfg.CADS_COMMAND, cads_one_run=cfg.CADS_ONE_RUN_PER_PATIENT)
     status.to_csv(out / "segmentation_status.csv", index=False, sep=";")
 
     from Image_loading.folder_detection import list_patient_dirs
